@@ -1,0 +1,3617 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0" />
+<meta name="theme-color" content="#F2542D" />
+<title>도시정비사업본부 타임로그</title>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- React 18 (UMD 빌드) -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<!-- 브라우저에서 바로 JSX를 변환해주는 Babel Standalone -->
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<!-- Supabase 클라이언트 (팀 전체가 공유하는 데이터 저장용) -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+<script>
+  // ---------------------------------------------------------------
+  // window.storage 셰임(shim)
+  // 원래 이 앱은 Claude 아티팩트 전용 저장소(window.storage)를 씁니다.
+  //
+  //  - "개인" 저장(shared=false, 예: 로그인 세션)은 이 기기의 localStorage에만
+  //    남아요. 원래도 기기별로 따로 유지되는 게 맞는 데이터라 그대로 뒀어요.
+  //  - "공유" 저장(shared=true, 본부/팀원/프로젝트/업무/기록 전체)은 이제
+  //    Supabase의 app_storage 테이블에 저장돼서, 다른 기기/다른 사람이 열어도
+  //    같은 데이터를 보고 씁니다. (약 8초마다 자동으로 새로고침돼요)
+  // ---------------------------------------------------------------
+  (function () {
+    if (window.storage) return;
+
+    var SUPABASE_URL = "https://juedjxapzmbwdlguecau.supabase.co";
+    var SUPABASE_KEY = "sb_publishable_rAQ73VKd9CSeDROf56Doxw_y-CnKs2q";
+    var sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+    var PREFIX = "ts-app-storage";
+    function fullKey(key, shared) {
+      return PREFIX + ":" + (shared ? "shared" : "personal") + ":" + key;
+    }
+
+    window.storage = {
+      get: async function (key, shared) {
+        shared = !!shared;
+        if (!shared) {
+          var raw = localStorage.getItem(fullKey(key, false));
+          if (raw === null) throw new Error("storage key not found: " + key);
+          return { key: key, value: raw, shared: false };
+        }
+        var res = await sb.from("app_storage").select("value").eq("key", key).maybeSingle();
+        if (res.error) throw res.error;
+        if (!res.data) throw new Error("storage key not found: " + key);
+        return { key: key, value: JSON.stringify(res.data.value), shared: true };
+      },
+
+      set: async function (key, value, shared) {
+        shared = !!shared;
+        if (!shared) {
+          localStorage.setItem(fullKey(key, false), value);
+          return { key: key, value: value, shared: false };
+        }
+        var parsed = JSON.parse(value);
+        var res = await sb.from("app_storage").upsert({ key: key, value: parsed, updated_at: new Date().toISOString() });
+        if (res.error) throw res.error;
+        return { key: key, value: value, shared: true };
+      },
+
+      delete: async function (key, shared) {
+        shared = !!shared;
+        if (!shared) {
+          var existed = localStorage.getItem(fullKey(key, false)) !== null;
+          localStorage.removeItem(fullKey(key, false));
+          return { key: key, deleted: existed, shared: false };
+        }
+        var res = await sb.from("app_storage").delete().eq("key", key);
+        if (res.error) throw res.error;
+        return { key: key, deleted: true, shared: true };
+      },
+
+      list: async function (prefix, shared) {
+        prefix = prefix || "";
+        shared = !!shared;
+        if (!shared) {
+          var searchPrefix = fullKey(prefix, false);
+          var base = fullKey("", false);
+          var keys = [];
+          for (var i = 0; i < localStorage.length; i++) {
+            var k = localStorage.key(i);
+            if (k && k.indexOf(searchPrefix) === 0) keys.push(k.slice(base.length));
+          }
+          return { keys: keys, prefix: prefix, shared: false };
+        }
+        var res = await sb.from("app_storage").select("key").like("key", prefix + "%");
+        if (res.error) throw res.error;
+        return { keys: res.data.map(function (r) { return r.key; }), prefix: prefix, shared: true };
+      },
+    };
+  })();
+</script>
+
+<!--
+  주의: 아래 소스는 type="text/plain" 이라서 브라우저가 실행하지 않고,
+  Babel 스탠드얼론이 스캔해서 자동 변환하지도 않아요. 대신 맨 아래 스크립트에서
+  직접 Babel.transform()을 "classic" 런타임 옵션으로 호출해서 변환한 뒤 실행합니다.
+  (자동/automatic 런타임을 쓰면 Babel이 "import ... from react/jsx-runtime" 구문을
+  자동으로 끼워 넣는데, 이건 일반 <script> 태그에서는 실행할 수 없어서 에러가 나요.)
+-->
+<script type="text/plain" id="app-source">
+const { useState, useEffect, useMemo, useRef, useLayoutEffect } = React;
+
+// -----------------------------------------------------------------
+// lucide-react 대신 쓰는 최소 아이콘 세트 (외부 패키지 의존성을 없애기 위해
+// 같은 이름 / 같은 사용법(size, className)으로 직접 SVG를 정의했습니다)
+// -----------------------------------------------------------------
+function makeIcon(children) {
+  return function Icon({ size = 16, className = "" }) {
+    return (
+      <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24"
+        fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+        className={className}>
+        {children}
+      </svg>
+    );
+  };
+}
+
+const Plus = makeIcon(<>
+  <line x1="12" y1="5" x2="12" y2="19"></line>
+  <line x1="5" y1="12" x2="19" y2="12"></line>
+</>);
+
+const X = makeIcon(<>
+  <line x1="18" y1="6" x2="6" y2="18"></line>
+  <line x1="6" y1="6" x2="18" y2="18"></line>
+</>);
+
+const Check = makeIcon(<polyline points="20 6 9 17 4 12"></polyline>);
+
+const ChevronLeft = makeIcon(<polyline points="15 18 9 12 15 6"></polyline>);
+const ChevronRight = makeIcon(<polyline points="9 18 15 12 9 6"></polyline>);
+
+const Trash2 = makeIcon(<>
+  <polyline points="3 6 5 6 21 6"></polyline>
+  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+  <line x1="10" y1="11" x2="10" y2="17"></line>
+  <line x1="14" y1="11" x2="14" y2="17"></line>
+</>);
+
+const Pencil = makeIcon(<>
+  <path d="M17 3a2.83 2.83 0 1 1 4 4L7 21l-4 1 1-4Z"></path>
+  <path d="m15 5 4 4"></path>
+</>);
+
+const FolderKanban = makeIcon(<>
+  <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"></path>
+  <path d="M8 10v4"></path>
+  <path d="M12 10v2"></path>
+  <path d="M16 10v6"></path>
+</>);
+
+const Loader2 = makeIcon(<path d="M21 12a9 9 0 1 1-6.219-8.56"></path>);
+
+const LogOut = makeIcon(<>
+  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+  <polyline points="16 17 21 12 16 7"></polyline>
+  <line x1="21" y1="12" x2="9" y2="12"></line>
+</>);
+
+const RefreshCw = makeIcon(<>
+  <path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path>
+  <path d="M21 3v5h-5"></path>
+  <path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path>
+  <path d="M3 21v-5h5"></path>
+</>);
+
+const LayoutGrid = makeIcon(<>
+  <rect x="3" y="3" width="7" height="7" rx="1"></rect>
+  <rect x="14" y="3" width="7" height="7" rx="1"></rect>
+  <rect x="14" y="14" width="7" height="7" rx="1"></rect>
+  <rect x="3" y="14" width="7" height="7" rx="1"></rect>
+</>);
+
+const Clock3 = makeIcon(<>
+  <circle cx="12" cy="12" r="10"></circle>
+  <polyline points="12 6 12 12 16.5 12"></polyline>
+</>);
+
+const Settings = makeIcon(<>
+  <circle cx="12" cy="12" r="3"></circle>
+  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"></path>
+</>);
+
+const CalendarDays = makeIcon(<>
+  <rect x="3" y="4" width="18" height="18" rx="2"></rect>
+  <line x1="16" y1="2" x2="16" y2="6"></line>
+  <line x1="8" y1="2" x2="8" y2="6"></line>
+  <line x1="3" y1="10" x2="21" y2="10"></line>
+  <line x1="8" y1="14" x2="8.01" y2="14"></line>
+  <line x1="12" y1="14" x2="12.01" y2="14"></line>
+  <line x1="16" y1="14" x2="16.01" y2="14"></line>
+  <line x1="8" y1="18" x2="8.01" y2="18"></line>
+  <line x1="12" y1="18" x2="12.01" y2="18"></line>
+</>);
+
+const Users = makeIcon(<>
+  <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path>
+  <circle cx="9" cy="7" r="4"></circle>
+  <path d="M22 21v-2a4 4 0 0 0-3-3.87"></path>
+  <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+</>);
+
+
+const SHARED_KEY = "team-timesheet-data-v8";
+const SESSION_KEY = "team-timesheet-session-v1";
+const TARGET_WEEK_MIN = 40 * 60;
+const POLL_MS = 8000;
+
+const PALETTE = [
+  "#F2542D", // 포인트 코랄레드
+  "#2C8C82", // 틸
+  "#D9A441", // 머스타드
+  "#916B98", // 플럼
+  "#5B6E8C", // 슬레이트 블루
+  "#7A9A6B", // 세이지
+];
+
+const STATUS_ORDER = ["todo", "in_progress", "on_hold", "done"];
+const STATUS_LABEL = { todo: "할 일", in_progress: "진행 중", on_hold: "보류", done: "완료" };
+const PRIORITY_LABEL = { low: "낮음", medium: "보통", high: "높음" };
+const PRIORITY_COLOR = { low: "#9A968D", medium: "#D9A441", high: "#F2542D" };
+
+const EVENT_CATEGORIES = [
+  { id: "client", label: "발주처 협의", color: "#5B6E8C" },
+  { id: "permit", label: "인허가청 협의", color: "#7A9A6B" },
+  { id: "site", label: "현장 점검", color: "#D9A441" },
+  { id: "internal", label: "내부 회의", color: "#916B98" },
+  { id: "etc", label: "기타", color: "#9A968D" },
+];
+const EVENT_CATEGORY_BY_ID = {};
+EVENT_CATEGORIES.forEach((c) => (EVENT_CATEGORY_BY_ID[c.id] = c));
+
+const LEAVE_TYPES = [
+  { id: "vacation", label: "휴가", color: "#5B6E8C" },
+  { id: "trip", label: "출장", color: "#D9A441" },
+  { id: "etc", label: "기타", color: "#9A968D" },
+];
+const LEAVE_TYPE_BY_ID = {};
+LEAVE_TYPES.forEach((t) => (LEAVE_TYPE_BY_ID[t.id] = t));
+
+const ROLE_LABEL = { super: "최고 관리자", admin: "본부 관리자", member: "일반 팀원" };
+const SUPER_OPTION = "__super__";
+const LOGO_SRC = "data:image/png;base64,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";
+
+
+const DEFAULT_DEPARTMENTS = [
+  { id: "d1", name: "도시정비사업본부" },
+  { id: "d2", name: "건축설계본부" },
+];
+
+const DEFAULT_PROJECTS = [
+  { id: "p1", name: "웹사이트 리뉴얼", client: "에이스코퍼레이션", color: PALETTE[0], departmentId: "d1" },
+  { id: "p2", name: "모바일 앱", client: "에이스코퍼레이션", color: PALETTE[1], departmentId: "d1" },
+  { id: "p3", name: "내부 업무", client: "", color: PALETTE[4], departmentId: "d1" },
+];
+
+// 데모용 기본 계정 — 비밀번호는 모두 1234 입니다.
+// super1 = 최고 관리자(전체), dohyun/seoyeon/haeun = 도시정비사업본부, jimin = 건축설계본부 관리자
+const DEFAULT_MEMBERS = [
+  { id: "m0", name: "정수빈", username: "super1", password: "1234", role: "super", departmentId: null, color: PALETTE[3], position: "본부장" },
+  { id: "m1", name: "김도윤", username: "dohyun", password: "1234", role: "admin", departmentId: "d1", color: PALETTE[0], position: "팀장" },
+  { id: "m2", name: "박서연", username: "seoyeon", password: "1234", role: "member", departmentId: "d1", color: PALETTE[1], position: "대리" },
+  { id: "m3", name: "이하은", username: "haeun", password: "1234", role: "member", departmentId: "d1", color: PALETTE[2], position: "사원" },
+  { id: "m4", name: "최지민", username: "jimin", password: "1234", role: "admin", departmentId: "d2", color: PALETTE[5], position: "팀장" },
+];
+
+const DEFAULT_TASKS = [
+  { id: "t1", title: "랜딩페이지 히어로 섹션 디자인", projectId: "p1", departmentId: "d1", assigneeId: "m2", status: "in_progress", priority: "high" },
+  { id: "t2", title: "로그인 API 연동", projectId: "p2", departmentId: "d1", assigneeId: "m1", status: "todo", priority: "medium" },
+  { id: "t3", title: "주간 회의록 정리", projectId: "p3", departmentId: "d1", assigneeId: "m3", status: "done", priority: "low" },
+];
+
+function uid() {
+  return Math.random().toString(36).slice(2, 10);
+}
+function pad(n) {
+  return String(n).padStart(2, "0");
+}
+function toKey(d) {
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+function startOfWeek(d) {
+  const date = new Date(d);
+  const day = (date.getDay() + 6) % 7;
+  date.setDate(date.getDate() - day);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+function addDays(d, n) {
+  const r = new Date(d);
+  r.setDate(r.getDate() + n);
+  return r;
+}
+function fmtHM(mins) {
+  const m = Math.max(0, Math.round(mins));
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  return `${h}:${pad(mm)}`;
+}
+const TIME_OPTIONS = Array.from({ length: 144 }, (_, i) => i * 10); // 자정부터 10분 단위, 0~1430
+function fmtTime(mins) {
+  if (mins === undefined || mins === null) return "";
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${pad(h)}:${pad(m)}`;
+}
+function monthDay(d) {
+  return d.toLocaleDateString("ko-KR", { month: "short", day: "numeric" });
+}
+function weekdayShort(d) {
+  return d.toLocaleDateString("ko-KR", { weekday: "short" });
+}
+function isSameDay(a, b) {
+  return toKey(a) === toKey(b);
+}
+function eventOccursOn(event, key) {
+  if (event.allDay) return key >= event.dateKey && key <= (event.endDateKey || event.dateKey);
+  return event.dateKey === key;
+}
+function dateRangeDays(startKey, endKey) {
+  const [sy, sm, sd] = startKey.split("-").map(Number);
+  const [ey, em, ed] = endKey.split("-").map(Number);
+  const start = new Date(sy, sm - 1, sd);
+  const end = new Date(ey, em - 1, ed);
+  const days = Math.round((end - start) / 86400000) + 1;
+  return Math.max(1, days);
+}
+function parseDateKey(key) {
+  const [y, m, d] = key.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+function initials(name) {
+  if (!name) return "?";
+  const trimmed = name.trim();
+  if (/[\uAC00-\uD7A3]/.test(trimmed)) return trimmed[0];
+  return trimmed.slice(0, 2).toUpperCase();
+}
+
+function TimesheetApp() {
+  const [loaded, setLoaded] = useState(false);
+  const [departments, setDepartments] = useState(DEFAULT_DEPARTMENTS);
+  const [projects, setProjects] = useState(DEFAULT_PROJECTS);
+  const [members, setMembers] = useState(DEFAULT_MEMBERS);
+  const [tasks, setTasks] = useState(DEFAULT_TASKS);
+  const [worklogs, setWorklogs] = useState([
+    { id: "w1", taskId: "t1", memberId: "m2", departmentId: "d1", dateKey: toKey(new Date()), startMinutes: 540, endMinutes: 630, minutes: 90, note: "" },
+  ]);
+  const [events, setEvents] = useState([
+    { id: "e1", categoryId: "client", title: "1차 실시설계 협의", memberId: "m1", departmentId: "d1", dateKey: toKey(new Date()), startMinutes: 660, endMinutes: 720, note: "", allDay: false },
+  ]);
+  const [leaves, setLeaves] = useState([
+    { id: "l1", typeId: "vacation", memberId: "m3", departmentId: "d1", startDateKey: toKey(addDays(new Date(), 2)), endDateKey: toKey(addDays(new Date(), 3)), note: "" },
+  ]);
+  const [session, setSession] = useState(null);
+
+  const [tab, setTab] = useState("timesheet"); // timesheet | board | projects | profile
+  const [selectedDate, setSelectedDate] = useState(() => new Date());
+  const [taskModal, setTaskModal] = useState(null); // {mode:'create'|'edit', task}
+  const [worklogModal, setWorklogModal] = useState(null); // {mode:'create'|'edit', worklog}
+  const [eventModal, setEventModal] = useState(null); // {mode:'create'|'edit', event}
+  const [leaveModal, setLeaveModal] = useState(null); // {mode:'create'|'edit', leave}
+  const [pendingDelete, setPendingDelete] = useState(null);
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [draftProject, setDraftProject] = useState({ name: "", client: "", color: PALETTE[0] });
+  const [syncing, setSyncing] = useState(false);
+  const [projectDetailId, setProjectDetailId] = useState(null);
+  const [viewingDepartmentId, setViewingDepartmentId] = useState(null); // 최고 관리자가 전환해서 볼 본부
+
+  async function loadShared() {
+    try {
+      const res = await window.storage.get(SHARED_KEY, true);
+      if (res && res.value) {
+        const data = JSON.parse(res.value);
+        if (Array.isArray(data.departments) && data.departments.length) setDepartments(data.departments);
+        if (Array.isArray(data.projects) && data.projects.length) setProjects(data.projects);
+        if (Array.isArray(data.members) && data.members.length) setMembers(data.members);
+        if (Array.isArray(data.tasks)) setTasks(data.tasks);
+        if (Array.isArray(data.worklogs)) setWorklogs(data.worklogs);
+        if (Array.isArray(data.events)) setEvents(data.events);
+        if (Array.isArray(data.leaves)) setLeaves(data.leaves);
+      }
+    } catch (e) {
+      // 아직 공유 데이터가 없음
+    }
+  }
+
+  useEffect(() => {
+    (async () => {
+      await loadShared();
+      try {
+        const res = await window.storage.get(SESSION_KEY, false);
+        if (res && res.value) {
+          const s = JSON.parse(res.value);
+          if (s.memberId) setSession(s.memberId);
+        }
+      } catch (e) {
+        // 로그인된 세션 없음
+      }
+      setLoaded(true);
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    (async () => {
+      try {
+        await window.storage.set(SHARED_KEY, JSON.stringify({ departments, projects, members, tasks, worklogs, events, leaves }), true);
+      } catch (e) {
+        console.error("저장 실패", e);
+      }
+    })();
+  }, [departments, projects, members, tasks, worklogs, events, leaves, loaded]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    (async () => {
+      try {
+        await window.storage.set(SESSION_KEY, JSON.stringify({ memberId: session }), false);
+      } catch (e) {
+        console.error("세션 저장 실패", e);
+      }
+    })();
+  }, [session, loaded]);
+
+  useEffect(() => {
+    if (!loaded || !session) return;
+    const id = setInterval(() => loadShared(), POLL_MS);
+    return () => clearInterval(id);
+  }, [loaded, session]);
+
+  const projectById = useMemo(() => {
+    const map = {};
+    projects.forEach((p) => (map[p.id] = p));
+    return map;
+  }, [projects]);
+
+  const memberById = useMemo(() => {
+    const map = {};
+    members.forEach((m) => (map[m.id] = m));
+    return map;
+  }, [members]);
+
+  const departmentById = useMemo(() => {
+    const map = {};
+    departments.forEach((d) => (map[d.id] = d));
+    return map;
+  }, [departments]);
+
+  const currentMember = session ? memberById[session] : null;
+  const isSuper = currentMember?.role === "super";
+
+  // 최고 관리자는 본부를 전환해서 볼 수 있고, 그 외에는 자기 본부로 고정
+  const scopedDepartmentId = isSuper ? viewingDepartmentId : currentMember?.departmentId || null;
+
+  useEffect(() => {
+    if (isSuper && !viewingDepartmentId && departments[0]) setViewingDepartmentId(departments[0].id);
+  }, [isSuper, viewingDepartmentId, departments]);
+
+  const scopedProjects = useMemo(() => projects.filter((p) => p.departmentId === scopedDepartmentId), [projects, scopedDepartmentId]);
+  const scopedTasks = useMemo(() => tasks.filter((t) => t.departmentId === scopedDepartmentId), [tasks, scopedDepartmentId]);
+  const scopedWorklogs = useMemo(() => worklogs.filter((w) => w.departmentId === scopedDepartmentId), [worklogs, scopedDepartmentId]);
+  const scopedEvents = useMemo(() => events.filter((e) => e.departmentId === scopedDepartmentId), [events, scopedDepartmentId]);
+  const scopedLeaves = useMemo(() => leaves.filter((l) => l.departmentId === scopedDepartmentId), [leaves, scopedDepartmentId]);
+  const scopedMembers = useMemo(() => members.filter((m) => m.departmentId === scopedDepartmentId), [members, scopedDepartmentId]);
+  const scopedProjectById = useMemo(() => {
+    const map = {};
+    scopedProjects.forEach((p) => (map[p.id] = p));
+    return map;
+  }, [scopedProjects]);
+  const scopedMemberById = useMemo(() => {
+    const map = {};
+    scopedMembers.forEach((m) => (map[m.id] = m));
+    return map;
+  }, [scopedMembers]);
+
+  function handleLogin(memberId) {
+    setSession(memberId);
+  }
+  function handleSignup({ name, username, password, color, departmentId }) {
+    const newMember = { id: uid(), name, username, password, color, role: "member", departmentId, position: "" };
+    setMembers((prev) => [...prev, newMember]);
+    setSession(newMember.id);
+  }
+  function handleBootstrapSuper({ name, username, password, color }) {
+    const newMember = { id: uid(), name, username, password, color, role: "super", departmentId: null, position: "" };
+    setMembers((prev) => [...prev, newMember]);
+    setSession(newMember.id);
+  }
+  function handleLogout() {
+    setSession(null);
+  }
+
+  function canManageDept(deptId) {
+    if (!currentMember) return false;
+    if (currentMember.role === "super") return true;
+    return currentMember.role === "admin" && currentMember.departmentId === deptId;
+  }
+
+  function toggleRole(memberId) {
+    const target = memberById[memberId];
+    if (!target || target.role === "super") return; // 최고 관리자 권한은 여기서 바꾸지 않음
+    if (!canManageDept(target.departmentId)) return;
+    const deptAdminCount = members.filter((m) => m.departmentId === target.departmentId && m.role === "admin").length;
+    if (target.role === "admin" && deptAdminCount <= 1) return; // 본부의 마지막 관리자는 해제할 수 없음
+    setMembers((prev) => prev.map((m) => (m.id === memberId ? { ...m, role: m.role === "admin" ? "member" : "admin" } : m)));
+  }
+
+  function deleteMember(memberId) {
+    const target = memberById[memberId];
+    if (!target || target.role === "super") return; // 최고 관리자는 여기서 삭제하지 않음
+    if (!canManageDept(target.departmentId)) return;
+    if (target.role === "admin") {
+      const deptAdminCount = members.filter((m) => m.departmentId === target.departmentId && m.role === "admin").length;
+      if (deptAdminCount <= 1) return; // 본부의 마지막 관리자는 삭제할 수 없음
+    }
+    setMembers((prev) => prev.filter((m) => m.id !== memberId));
+    setPendingDelete(null);
+  }
+
+  function addDepartment(name) {
+    if (!isSuper) return;
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const dept = { id: uid(), name: trimmed };
+    setDepartments((prev) => [...prev, dept]);
+    setViewingDepartmentId(dept.id);
+  }
+
+  function deleteDepartment(id) {
+    if (!isSuper) return;
+    setDepartments((prev) => prev.filter((d) => d.id !== id));
+    setMembers((prev) => prev.filter((m) => m.departmentId !== id));
+    setProjects((prev) => prev.filter((p) => p.departmentId !== id));
+    setTasks((prev) => prev.filter((t) => t.departmentId !== id));
+    setWorklogs((prev) => prev.filter((w) => w.departmentId !== id));
+    setEvents((prev) => prev.filter((e) => e.departmentId !== id));
+    setLeaves((prev) => prev.filter((l) => l.departmentId !== id));
+    setViewingDepartmentId((prev) => (prev === id ? null : prev));
+    setPendingDelete(null);
+  }
+
+  function reassignDepartment(memberId, newDepartmentId) {
+    if (!isSuper) return;
+    setMembers((prev) =>
+      prev.map((m) => {
+        if (m.id !== memberId || m.role === "super") return m;
+        if (m.departmentId === newDepartmentId) return m;
+        // 본부가 바뀌면 이전 본부의 관리자 권한은 초기화돼요
+        return { ...m, departmentId: newDepartmentId, role: m.role === "admin" ? "member" : m.role };
+      })
+    );
+  }
+
+  function updateProfile({ name, position }) {
+    if (!session) return { ok: false, error: "로그인이 필요해요." };
+    const trimmed = name.trim();
+    if (!trimmed) return { ok: false, error: "이름을 입력해주세요." };
+    const dup = members.some((m) => m.id !== session && m.name.toLowerCase() === trimmed.toLowerCase());
+    if (dup) return { ok: false, error: "이미 사용 중인 이름이에요." };
+    setMembers((prev) => prev.map((m) => (m.id === session ? { ...m, name: trimmed, position: position.trim() } : m)));
+    return { ok: true };
+  }
+
+  function changePassword({ currentPassword, newPassword, newPassword2 }) {
+    if (!session) return { ok: false, error: "로그인이 필요해요." };
+    const me = memberById[session];
+    if (!me || me.password !== currentPassword) return { ok: false, error: "현재 비밀번호가 올바르지 않아요." };
+    if (!newPassword || newPassword.length < 4) return { ok: false, error: "새 비밀번호는 4자 이상으로 설정해주세요." };
+    if (newPassword !== newPassword2) return { ok: false, error: "새 비밀번호가 서로 일치하지 않아요." };
+    setMembers((prev) => prev.map((m) => (m.id === session ? { ...m, password: newPassword } : m)));
+    return { ok: true };
+  }
+
+  function saveTask(task) {
+    setTasks((prev) => {
+      const exists = prev.some((t) => t.id === task.id);
+      if (exists) return prev.map((t) => (t.id === task.id ? task : t));
+      return [task, ...prev];
+    });
+    setTaskModal(null);
+  }
+  function deleteTask(id) {
+    setTasks((prev) => prev.filter((t) => t.id !== id));
+    setWorklogs((prev) => prev.filter((w) => w.taskId !== id));
+    setPendingDelete(null);
+  }
+  function setTaskStatus(taskId, status) {
+    setTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, status } : t)));
+  }
+
+  function saveWorklog(worklog) {
+    if (worklog.memberId !== session) return;
+    setWorklogs((prev) => {
+      const exists = prev.some((w) => w.id === worklog.id);
+      if (exists) return prev.map((w) => (w.id === worklog.id ? worklog : w));
+      return [worklog, ...prev];
+    });
+    setWorklogModal(null);
+  }
+  function deleteWorklog(id) {
+    setWorklogs((prev) => prev.filter((w) => !(w.id === id && w.memberId === session)));
+    setPendingDelete(null);
+  }
+
+  function saveEvent(event) {
+    if (event.memberId !== session) return;
+    setEvents((prev) => {
+      const exists = prev.some((e) => e.id === event.id);
+      if (exists) return prev.map((e) => (e.id === event.id ? event : e));
+      return [event, ...prev];
+    });
+    setEventModal(null);
+  }
+  function deleteEvent(id) {
+    setEvents((prev) => prev.filter((e) => !(e.id === id && e.memberId === session)));
+    setPendingDelete(null);
+  }
+
+  function saveLeave(leave) {
+    if (leave.memberId !== session) return;
+    setLeaves((prev) => {
+      const exists = prev.some((l) => l.id === leave.id);
+      if (exists) return prev.map((l) => (l.id === leave.id ? leave : l));
+      return [leave, ...prev];
+    });
+    setLeaveModal(null);
+  }
+  function deleteLeave(id) {
+    setLeaves((prev) => prev.filter((l) => !(l.id === id && l.memberId === session)));
+    setPendingDelete(null);
+  }
+
+  function addProject() {
+    if (!draftProject.name.trim() || !scopedDepartmentId) return;
+    const proj = { id: uid(), name: draftProject.name.trim(), client: draftProject.client.trim(), color: draftProject.color, departmentId: scopedDepartmentId };
+    setProjects((prev) => [...prev, proj]);
+    setDraftProject({ name: "", client: "", color: PALETTE[0] });
+    setNewProjectOpen(false);
+  }
+  function deleteProject(id) {
+    setProjects((prev) => prev.filter((p) => p.id !== id));
+    setPendingDelete(null);
+  }
+
+  async function manualSync() {
+    setSyncing(true);
+    await loadShared();
+    setTimeout(() => setSyncing(false), 400);
+  }
+
+  const worklogTotalByTask = useMemo(() => {
+    const map = {};
+    scopedWorklogs.forEach((w) => {
+      map[w.taskId] = (map[w.taskId] || 0) + w.minutes;
+    });
+    return map;
+  }, [scopedWorklogs]);
+
+  if (!loaded) {
+    return (
+      <div className="ts-loading">
+        <Loader2 className="spin" size={20} />
+        <span>불러오는 중…</span>
+        <Styles />
+      </div>
+    );
+  }
+
+  if (!session) {
+    return (
+      <div className="ts-root">
+        <Styles />
+        <AuthScreen departments={departments} members={members} onLogin={handleLogin} onSignup={handleSignup} onBootstrapSuper={handleBootstrapSuper} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="ts-root">
+      <Styles />
+
+      <header className="ts-header">
+        <div className="ts-brand">
+          <img src={LOGO_SRC} alt="행림" className="ts-brand-logo" />
+        </div>
+        {isSuper ? (
+          <select className="ts-select ts-dept-switch" value={viewingDepartmentId || ""} onChange={(e) => setViewingDepartmentId(e.target.value)}>
+            {departments.length === 0 && <option value="">등록된 본부 없음</option>}
+            {departments.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <span className="ts-dept-badge">{departmentById[currentMember?.departmentId]?.name || "본부 미지정"}</span>
+        )}
+        <nav className="ts-nav-desktop">
+          {["timesheet", "schedule", "board", "projects", "team", "profile"].map((t) => (
+            <button key={t} className={`ts-nav-btn ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
+              {t === "timesheet"
+                ? "타임시트"
+                : t === "schedule"
+                ? "일정"
+                : t === "board"
+                ? "보드"
+                : t === "projects"
+                ? "프로젝트"
+                : t === "team"
+                ? "팀원"
+                : "내 정보"}
+            </button>
+          ))}
+        </nav>
+        <div className="ts-header-user">
+          <MemberAvatar member={currentMember} size={26} />
+          <span className="ts-header-username">
+            {currentMember?.name}
+            {currentMember?.role !== "member" && <span className="ts-admin-badge">{ROLE_LABEL[currentMember?.role]}</span>}
+          </span>
+          <button className="ts-icon-btn" onClick={handleLogout} aria-label="로그아웃">
+            <LogOut size={15} />
+          </button>
+        </div>
+      </header>
+
+      <main className="ts-main">
+        {!scopedDepartmentId ? (
+          <div className="ts-card ts-list-card">
+            <EmptyState label={isSuper ? "먼저 상단에서 본부를 만들거나 선택해주세요." : "소속된 본부가 없어요. 관리자에게 문의해주세요."} />
+          </div>
+        ) : (
+          <>
+            {tab === "timesheet" && (
+              <TimesheetTab
+                selectedDate={selectedDate}
+                setSelectedDate={setSelectedDate}
+                worklogs={scopedWorklogs}
+                events={scopedEvents}
+                tasks={scopedTasks}
+                members={scopedMembers}
+                memberById={scopedMemberById}
+                projectById={scopedProjectById}
+                session={session}
+                onEdit={(worklog) => setWorklogModal({ mode: "edit", worklog })}
+                onCreate={(dateKey) =>
+                  setWorklogModal({
+                    mode: "create",
+                    worklog: { id: uid(), taskId: scopedTasks[0]?.id || "", memberId: session, departmentId: scopedDepartmentId, dateKey, startMinutes: 540, endMinutes: 600, note: "" },
+                  })
+                }
+                onEditEvent={(event) => setEventModal({ mode: "edit", event })}
+                onCreateEvent={(dateKey) =>
+                  setEventModal({
+                    mode: "create",
+                    event: { id: uid(), categoryId: EVENT_CATEGORIES[0].id, title: "", memberId: session, departmentId: scopedDepartmentId, dateKey, startMinutes: 600, endMinutes: 660, allDay: false, note: "" },
+                  })
+                }
+              />
+            )}
+
+            {tab === "schedule" && (
+              <ScheduleTab
+                leaves={scopedLeaves}
+                members={scopedMembers}
+                memberById={scopedMemberById}
+                session={session}
+                onNew={() =>
+                  setLeaveModal({
+                    mode: "create",
+                    leave: { id: uid(), typeId: LEAVE_TYPES[0].id, memberId: session, departmentId: scopedDepartmentId, startDateKey: toKey(new Date()), endDateKey: toKey(new Date()), note: "" },
+                  })
+                }
+                onEdit={(leave) => setLeaveModal({ mode: "edit", leave })}
+              />
+            )}
+
+            {tab === "board" && (
+              <BoardTab
+                tasks={scopedTasks}
+                members={scopedMembers}
+                memberById={scopedMemberById}
+                projects={scopedProjects}
+                projectById={scopedProjectById}
+                worklogTotalByTask={worklogTotalByTask}
+                session={session}
+                isAdmin={isSuper || currentMember?.role === "admin"}
+                onNewTask={() =>
+                  setTaskModal({
+                    mode: "create",
+                    task: { id: uid(), title: "", projectId: scopedProjects[0]?.id || "", departmentId: scopedDepartmentId, assigneeId: session, status: "todo", priority: "medium" },
+                  })
+                }
+                onEditTask={(task) => setTaskModal({ mode: "edit", task })}
+                onAskDeleteTask={(id) => setPendingDelete({ type: "task", id })}
+                onSetStatus={setTaskStatus}
+                onLogTime={(taskId) =>
+                  setWorklogModal({
+                    mode: "create",
+                    worklog: { id: uid(), taskId, memberId: session, departmentId: scopedDepartmentId, dateKey: toKey(new Date()), startMinutes: 540, endMinutes: 600, note: "" },
+                  })
+                }
+                pendingDelete={pendingDelete}
+                onConfirmDeleteTask={deleteTask}
+                onCancelDelete={() => setPendingDelete(null)}
+                onSync={manualSync}
+                syncing={syncing}
+                onOpenDetail={(id) => setProjectDetailId(id)}
+              />
+            )}
+
+            {tab === "projects" && (
+              <ProjectsTab
+                projects={scopedProjects}
+                tasks={scopedTasks}
+                worklogs={scopedWorklogs}
+                onOpenDetail={(id) => setProjectDetailId(id)}
+                newProjectOpen={newProjectOpen}
+                setNewProjectOpen={setNewProjectOpen}
+                draftProject={draftProject}
+                setDraftProject={setDraftProject}
+                onAdd={addProject}
+                pendingDelete={pendingDelete}
+                onAskDelete={(id) => setPendingDelete({ type: "project", id })}
+                onConfirmDelete={deleteProject}
+                onCancelDelete={() => setPendingDelete(null)}
+              />
+            )}
+
+            {tab === "team" && (
+              <TeamTab
+                members={scopedMembers}
+                currentMember={currentMember}
+                onToggleRole={toggleRole}
+                isSuper={isSuper}
+                departments={departments}
+                onAddDepartment={addDepartment}
+                viewingDepartmentId={scopedDepartmentId}
+                setViewingDepartmentId={setViewingDepartmentId}
+                allMembers={members}
+                onReassignDepartment={reassignDepartment}
+                pendingDelete={pendingDelete}
+                onAskDeleteMember={(id) => setPendingDelete({ type: "member", id })}
+                onConfirmDeleteMember={deleteMember}
+                onAskDeleteDepartment={(id) => setPendingDelete({ type: "department", id })}
+                onCancelDelete={() => setPendingDelete(null)}
+              />
+            )}
+
+            {tab === "profile" && (
+              <ProfileTab
+                currentMember={currentMember}
+                departmentName={departmentById[currentMember?.departmentId]?.name}
+                onSave={updateProfile}
+                onChangePassword={changePassword}
+              />
+            )}
+          </>
+        )}
+      </main>
+
+      <nav className="ts-nav-mobile">
+        {[
+          { key: "timesheet", label: "타임시트", icon: Clock3 },
+          { key: "schedule", label: "일정", icon: CalendarDays },
+          { key: "board", label: "보드", icon: LayoutGrid },
+          { key: "projects", label: "프로젝트", icon: FolderKanban },
+          { key: "team", label: "팀원", icon: Users },
+          { key: "profile", label: "내 정보", icon: Settings },
+        ].map(({ key, label, icon: Icon }) => (
+          <button key={key} className={`ts-nav-mobile-btn ${tab === key ? "active" : ""}`} onClick={() => setTab(key)}>
+            <Icon size={16} />
+            <span>{label}</span>
+          </button>
+        ))}
+      </nav>
+
+      {taskModal && (
+        <TaskModal
+          modal={taskModal}
+          projects={scopedProjects}
+          members={scopedMembers}
+          isAdmin={isSuper || currentMember?.role === "admin"}
+          onClose={() => setTaskModal(null)}
+          onSave={saveTask}
+        />
+      )}
+
+      {worklogModal && (
+        <WorklogModal
+          modal={worklogModal}
+          tasks={scopedTasks}
+          projects={scopedProjects}
+          projectById={scopedProjectById}
+          session={session}
+          currentMember={currentMember}
+          onClose={() => setWorklogModal(null)}
+          onSave={saveWorklog}
+          onDelete={(id) => {
+            deleteWorklog(id);
+            setWorklogModal(null);
+          }}
+        />
+      )}
+
+      {eventModal && (
+        <EventModal
+          modal={eventModal}
+          session={session}
+          currentMember={currentMember}
+          members={scopedMembers}
+          memberById={scopedMemberById}
+          onClose={() => setEventModal(null)}
+          onSave={saveEvent}
+          onDelete={(id) => {
+            deleteEvent(id);
+            setEventModal(null);
+          }}
+        />
+      )}
+
+      {leaveModal && (
+        <LeaveModal
+          modal={leaveModal}
+          session={session}
+          currentMember={currentMember}
+          onClose={() => setLeaveModal(null)}
+          onSave={saveLeave}
+          onDelete={(id) => {
+            deleteLeave(id);
+            setLeaveModal(null);
+          }}
+        />
+      )}
+
+      {projectDetailId && scopedProjectById[projectDetailId] && (
+        <ProjectDetailModal
+          project={scopedProjectById[projectDetailId]}
+          tasks={scopedTasks.filter((t) => t.projectId === projectDetailId)}
+          memberById={scopedMemberById}
+          projectById={scopedProjectById}
+          worklogTotalByTask={worklogTotalByTask}
+          session={session}
+          isAdmin={isSuper || currentMember?.role === "admin"}
+          onClose={() => setProjectDetailId(null)}
+          onNewTask={() =>
+            setTaskModal({
+              mode: "create",
+              task: { id: uid(), title: "", projectId: projectDetailId, departmentId: scopedDepartmentId, assigneeId: session, status: "todo", priority: "medium" },
+            })
+          }
+          onEditTask={(task) => setTaskModal({ mode: "edit", task })}
+          onAskDeleteTask={(id) => setPendingDelete({ type: "task", id })}
+          onSetStatus={setTaskStatus}
+          onLogTime={(taskId) =>
+            setWorklogModal({
+              mode: "create",
+              worklog: { id: uid(), taskId, memberId: session, departmentId: scopedDepartmentId, dateKey: toKey(new Date()), startMinutes: 540, endMinutes: 600, note: "" },
+            })
+          }
+          pendingDelete={pendingDelete}
+          onCancelDelete={() => setPendingDelete(null)}
+        />
+      )}
+
+      {pendingDelete?.type === "task" && (
+        <ConfirmBar
+          label="이 업무를 삭제할까요? 기록된 시간도 함께 삭제돼요."
+          onConfirm={() => deleteTask(pendingDelete.id)}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
+
+      {pendingDelete?.type === "department" && (
+        <ConfirmBar
+          label={`"${departments.find((d) => d.id === pendingDelete.id)?.name || "이 본부"}"를 삭제할까요? 이 본부의 팀원, 프로젝트, 업무, 타임로그, 이벤트, 휴가 기록이 모두 함께 삭제돼요. 되돌릴 수 없어요.`}
+          onConfirm={() => deleteDepartment(pendingDelete.id)}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function ConfirmBar({ label, onConfirm, onCancel }) {
+  return (
+    <div className="ts-modal-backdrop" onClick={onCancel}>
+      <div className="ts-modal ts-confirm-modal" onClick={(e) => e.stopPropagation()}>
+        <p>{label}</p>
+        <div className="ts-modal-actions">
+          <button className="ts-btn ts-btn-ghost" onClick={onCancel}>
+            취소
+          </button>
+          <button className="ts-btn ts-btn-danger-solid" onClick={onConfirm}>
+            삭제
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProjectDetailModal({
+  project,
+  tasks,
+  memberById,
+  projectById,
+  worklogTotalByTask,
+  session,
+  isAdmin,
+  onClose,
+  onNewTask,
+  onEditTask,
+  onAskDeleteTask,
+  onSetStatus,
+  onLogTime,
+  pendingDelete,
+  onCancelDelete,
+}) {
+  const totalMinutes = tasks.reduce((s, t) => s + (worklogTotalByTask[t.id] || 0), 0);
+  return (
+    <div className="ts-modal-backdrop ts-project-detail-backdrop" onClick={onClose}>
+      <div className="ts-modal ts-project-detail-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="ts-modal-head">
+          <div className="ts-project-detail-title">
+            <span className="ts-dot" style={{ background: project.color }} />
+            <h3>{project.name}</h3>
+          </div>
+          <button className="ts-icon-btn" onClick={onClose} aria-label="닫기">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="ts-muted">
+          {project.client && `${project.client} · `}
+          업무 {tasks.length}개 · 누적 {fmtHM(totalMinutes)}
+        </div>
+
+        <button className="ts-btn ts-btn-start ts-btn-small ts-project-detail-add" onClick={onNewTask}>
+          <Plus size={14} />이 프로젝트에 업무 추가
+        </button>
+
+        <div className="ts-stack ts-tight">
+          {tasks.length === 0 ? (
+            <div className="ts-card ts-list-card">
+              <EmptyState label="이 프로젝트에 등록된 업무가 없어요." />
+            </div>
+          ) : (
+            <StatusColumns
+              tasks={tasks}
+              memberById={memberById}
+              projectById={projectById}
+              worklogTotalByTask={worklogTotalByTask}
+              session={session}
+              isAdmin={isAdmin}
+              onEditTask={onEditTask}
+              onAskDeleteTask={onAskDeleteTask}
+              onSetStatus={onSetStatus}
+              onLogTime={onLogTime}
+              pendingDelete={pendingDelete}
+              onCancelDelete={onCancelDelete}
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MemberAvatar({ member, size = 26 }) {
+  return (
+    <span className="ts-avatar" style={{ width: size, height: size, fontSize: size * 0.4, background: member ? member.color : "#C9C4BA" }}>
+      {initials(member?.name)}
+    </span>
+  );
+}
+
+function PriorityBadge({ priority }) {
+  return (
+    <span className="ts-priority-badge" style={{ color: PRIORITY_COLOR[priority] }}>
+      <span className="ts-priority-dot" style={{ background: PRIORITY_COLOR[priority] }} />
+      {PRIORITY_LABEL[priority]}
+    </span>
+  );
+}
+
+function AuthScreen({ departments, members, onLogin, onSignup, onBootstrapSuper }) {
+  const isBootstrap = departments.length === 0 && members.length === 0;
+  const [mode, setMode] = useState("login");
+  const [deptId, setDeptId] = useState(SUPER_OPTION);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+
+  const [name, setName] = useState("");
+  const [signupUsername, setSignupUsername] = useState("");
+  const [signupPassword, setSignupPassword] = useState("");
+  const [signupPassword2, setSignupPassword2] = useState("");
+  const [color, setColor] = useState(PALETTE[0]);
+
+  function submitLogin() {
+    const uname = username.trim().toLowerCase();
+    if (!uname || !password) {
+      setError("계정과 비밀번호를 입력해주세요.");
+      return;
+    }
+    const member =
+      deptId === SUPER_OPTION
+        ? members.find((m) => m.role === "super" && m.username.toLowerCase() === uname)
+        : members.find((m) => m.username.toLowerCase() === uname && m.departmentId === deptId);
+    if (!member || member.password !== password) {
+      setError("계정 또는 비밀번호가 올바르지 않아요.");
+      return;
+    }
+    setError("");
+    onLogin(member.id);
+  }
+
+  function submitSignup() {
+    const trimmedName = name.trim();
+    const uname = signupUsername.trim();
+    if (!trimmedName || !uname) {
+      setError("이름과 계정을 입력해주세요.");
+      return;
+    }
+    if (!deptId || deptId === SUPER_OPTION) {
+      setError("본부를 선택해주세요.");
+      return;
+    }
+    if (members.some((m) => m.username.toLowerCase() === uname.toLowerCase())) {
+      setError("이미 사용 중인 계정이에요.");
+      return;
+    }
+    if (signupPassword.length < 4) {
+      setError("비밀번호는 4자 이상으로 설정해주세요.");
+      return;
+    }
+    if (signupPassword !== signupPassword2) {
+      setError("비밀번호가 서로 일치하지 않아요.");
+      return;
+    }
+    setError("");
+    onSignup({ name: trimmedName, username: uname, password: signupPassword, color, departmentId: deptId });
+  }
+
+  function submitBootstrap() {
+    const trimmedName = name.trim();
+    const uname = signupUsername.trim();
+    if (!trimmedName || !uname) {
+      setError("이름과 계정을 입력해주세요.");
+      return;
+    }
+    if (signupPassword.length < 4) {
+      setError("비밀번호는 4자 이상으로 설정해주세요.");
+      return;
+    }
+    if (signupPassword !== signupPassword2) {
+      setError("비밀번호가 서로 일치하지 않아요.");
+      return;
+    }
+    setError("");
+    onBootstrapSuper({ name: trimmedName, username: uname, password: signupPassword, color });
+  }
+
+  if (isBootstrap) {
+    return (
+      <div className="ts-auth-wrap">
+        <div className="ts-auth-card">
+          <div className="ts-brand ts-auth-brand">
+            <img src={LOGO_SRC} alt="행림" className="ts-brand-logo" />
+          </div>
+          <p className="ts-auth-sub">아직 등록된 계정이 없어요. 시스템을 관리할 최고 관리자 계정을 먼저 만들어주세요.</p>
+          <div className="ts-auth-body">
+            <label className="ts-field-label">이름</label>
+            <input className="ts-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="이름을 입력하세요" autoFocus />
+
+            <label className="ts-field-label">계정 (아이디)</label>
+            <input className="ts-input" value={signupUsername} onChange={(e) => setSignupUsername(e.target.value)} placeholder="영문/숫자 아이디" />
+
+            <label className="ts-field-label">색상</label>
+            <div className="ts-swatches">
+              {PALETTE.map((c) => (
+                <button key={c} className={`ts-swatch ${color === c ? "selected" : ""}`} style={{ background: c }} onClick={() => setColor(c)} aria-label={`색상 ${c}`} />
+              ))}
+            </div>
+
+            <div className="ts-modal-row">
+              <div>
+                <label className="ts-field-label">비밀번호</label>
+                <input className="ts-input" type="password" value={signupPassword} onChange={(e) => setSignupPassword(e.target.value)} />
+              </div>
+              <div>
+                <label className="ts-field-label">비밀번호 확인</label>
+                <input className="ts-input" type="password" value={signupPassword2} onChange={(e) => setSignupPassword2(e.target.value)} />
+              </div>
+            </div>
+
+            {error && <div className="ts-auth-error">{error}</div>}
+            <button className="ts-btn ts-btn-start ts-auth-submit" onClick={submitBootstrap}>
+              최고 관리자로 시작하기
+            </button>
+          </div>
+          <p className="ts-auth-note">이 계정은 모든 본부를 만들고 관리할 수 있어요. 이후 여기서 본부별 계정을 만들 수 있어요.</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="ts-auth-wrap">
+      <div className="ts-auth-card">
+        <div className="ts-brand ts-auth-brand">
+          <img src={LOGO_SRC} alt="행림" className="ts-brand-logo" />
+        </div>
+        <p className="ts-auth-sub">본부를 선택하고 계정으로 로그인해주세요.</p>
+
+        <div className="ts-auth-tabs">
+          <button className={`ts-auth-tab ${mode === "login" ? "active" : ""}`} onClick={() => { setMode("login"); setError(""); }}>
+            로그인
+          </button>
+          <button className={`ts-auth-tab ${mode === "signup" ? "active" : ""}`} onClick={() => { setMode("signup"); setError(""); if (deptId === SUPER_OPTION) setDeptId(departments[0]?.id || ""); }}>
+            회원가입
+          </button>
+        </div>
+
+        <div className="ts-auth-body">
+          <label className="ts-field-label">작업공간 (본부)</label>
+          <select className="ts-select ts-select-full" value={deptId} onChange={(e) => setDeptId(e.target.value)}>
+            {mode === "login" && <option value={SUPER_OPTION}>최고 관리자 (전체)</option>}
+            {departments.length === 0 && <option value="">등록된 본부 없음</option>}
+            {departments.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name}
+              </option>
+            ))}
+          </select>
+
+          {mode === "login" ? (
+            <>
+              <label className="ts-field-label">계정</label>
+              <input className="ts-input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="아이디" />
+              <label className="ts-field-label">비밀번호</label>
+              <input
+                className="ts-input"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && submitLogin()}
+              />
+              {error && <div className="ts-auth-error">{error}</div>}
+              <button className="ts-btn ts-btn-start ts-auth-submit" onClick={submitLogin}>
+                로그인
+              </button>
+            </>
+          ) : (
+            <>
+              <label className="ts-field-label">이름</label>
+              <input className="ts-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="이름을 입력하세요" />
+
+              <label className="ts-field-label">계정 (아이디)</label>
+              <input className="ts-input" value={signupUsername} onChange={(e) => setSignupUsername(e.target.value)} placeholder="영문/숫자 아이디" />
+
+              <label className="ts-field-label">색상</label>
+              <div className="ts-swatches">
+                {PALETTE.map((c) => (
+                  <button key={c} className={`ts-swatch ${color === c ? "selected" : ""}`} style={{ background: c }} onClick={() => setColor(c)} aria-label={`색상 ${c}`} />
+                ))}
+              </div>
+
+              <div className="ts-modal-row">
+                <div>
+                  <label className="ts-field-label">비밀번호</label>
+                  <input className="ts-input" type="password" value={signupPassword} onChange={(e) => setSignupPassword(e.target.value)} />
+                </div>
+                <div>
+                  <label className="ts-field-label">비밀번호 확인</label>
+                  <input className="ts-input" type="password" value={signupPassword2} onChange={(e) => setSignupPassword2(e.target.value)} />
+                </div>
+              </div>
+
+              {error && <div className="ts-auth-error">{error}</div>}
+              <button className="ts-btn ts-btn-start ts-auth-submit" onClick={submitSignup} disabled={!departments.length}>
+                가입하고 시작하기
+              </button>
+            </>
+          )}
+        </div>
+        <p className="ts-auth-note">간단한 팀 내부용 로그인이에요. 비밀번호는 암호화되지 않으니 민감한 계정 정보로는 사용하지 마세요.</p>
+      </div>
+    </div>
+  );
+}
+
+function ProjectProgressSection({ projects, tasks, onOpenDetail }) {
+  if (projects.length === 0) return null;
+  return (
+    <div>
+      <div className="ts-section-head">
+        <h2>프로젝트 진행 현황</h2>
+      </div>
+      <div className="ts-card ts-list-card">
+        {projects.map((p) => {
+          const projTasks = tasks.filter((t) => t.projectId === p.id);
+          const total = projTasks.length;
+          const done = projTasks.filter((t) => t.status === "done").length;
+          const pct = total === 0 ? 0 : Math.round((done / total) * 100);
+          return (
+            <div className="ts-progress-row" key={p.id} onClick={() => onOpenDetail?.(p.id)} role="button" tabIndex={0}>
+              <span className="ts-dot" style={{ background: p.color }} />
+              <div className="ts-project-info">
+                <div className="ts-project-name">{p.name}</div>
+                <div className="ts-muted">{total === 0 ? "등록된 업무 없음" : `업무 ${done}/${total}개 완료`}</div>
+              </div>
+              <div className="ts-progress-pct-wrap">
+                <div className="ts-progress-track">
+                  <div className="ts-progress-fill" style={{ width: `${pct}%`, background: p.color }} />
+                </div>
+                <span className="ts-progress-pct-num">{pct}%</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function BoardTab({
+  tasks,
+  members,
+  memberById,
+  projects,
+  projectById,
+  worklogTotalByTask,
+  session,
+  isAdmin,
+  onNewTask,
+  onEditTask,
+  onAskDeleteTask,
+  onSetStatus,
+  onLogTime,
+  pendingDelete,
+  onCancelDelete,
+  onSync,
+  syncing,
+  onOpenDetail,
+}) {
+  const [filterMemberId, setFilterMemberId] = useState(null);
+  const [selectedProjectId, setSelectedProjectId] = useState(null);
+
+  const filteredTasks = filterMemberId ? tasks.filter((t) => t.assigneeId === filterMemberId) : tasks;
+
+  function selectProject(id) {
+    setSelectedProjectId((prev) => (prev === id ? null : id));
+  }
+
+  const selectedProject = selectedProjectId ? projectById[selectedProjectId] : null;
+  const selectedProjectTasks = selectedProjectId ? filteredTasks.filter((t) => t.projectId === selectedProjectId) : [];
+  const selectedCounts = {};
+  STATUS_ORDER.forEach((s) => (selectedCounts[s] = 0));
+  selectedProjectTasks.forEach((t) => (selectedCounts[t.status] = (selectedCounts[t.status] || 0) + 1));
+  const selectedRemaining = selectedProjectTasks.length - selectedCounts.done;
+
+  return (
+    <div className="ts-stack">
+      <div className="ts-section-head">
+        <h2>업무 보드</h2>
+        <div className="ts-board-head-actions">
+          <button className="ts-add-mini" onClick={onSync} aria-label="새로고침">
+            <RefreshCw size={13} className={syncing ? "spin" : ""} />
+          </button>
+          <button className="ts-btn ts-btn-start ts-btn-small" onClick={onNewTask}>
+            <Plus size={14} />새 업무
+          </button>
+        </div>
+      </div>
+
+      <ProjectProgressSection projects={projects} tasks={tasks} onOpenDetail={onOpenDetail} />
+
+      {members.length > 0 && (
+        <div className="ts-filter-row">
+          <button className={`ts-filter-chip ${filterMemberId === null ? "selected" : ""}`} onClick={() => setFilterMemberId(null)}>
+            전체
+          </button>
+          {members.map((m) => (
+            <button
+              key={m.id}
+              className={`ts-filter-chip ${filterMemberId === m.id ? "selected" : ""}`}
+              style={filterMemberId === m.id ? { background: m.color + "22", color: m.color, borderColor: m.color + "55" } : {}}
+              onClick={() => setFilterMemberId(m.id)}
+            >
+              {m.name}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="ts-section-head">
+        <h2>프로젝트별 세부업무</h2>
+      </div>
+
+      {projects.length === 0 ? (
+        <div className="ts-card ts-list-card">
+          <EmptyState label="등록된 프로젝트가 없어요." />
+        </div>
+      ) : (
+        <>
+          <div className="ts-filter-row">
+            {projects.map((project) => (
+              <button
+                key={project.id}
+                className={`ts-filter-chip ts-project-toggle-chip ${selectedProjectId === project.id ? "selected" : ""}`}
+                style={selectedProjectId === project.id ? { background: project.color + "22", color: project.color, borderColor: project.color + "55" } : {}}
+                onClick={() => selectProject(project.id)}
+              >
+                <span className="ts-dot" style={{ background: project.color }} />
+                {project.name}
+              </button>
+            ))}
+          </div>
+
+          {!selectedProject ? (
+            <div className="ts-card ts-list-card">
+              <EmptyState label="프로젝트를 선택하면 세부 업무가 보여요." />
+            </div>
+          ) : (
+            <>
+              {selectedProjectTasks.length > 0 && (
+                <div className="ts-project-status-summary">
+                  <span className="ts-col-count">잔여 {selectedRemaining}건</span>
+                  {STATUS_ORDER.map((s) => (
+                    <span key={s} className="ts-status-count-chip">
+                      {STATUS_LABEL[s]} <b>{selectedCounts[s]}</b>
+                    </span>
+                  ))}
+                </div>
+              )}
+              {selectedProjectTasks.length === 0 ? (
+                <div className="ts-card ts-list-card">
+                  <EmptyState label="이 프로젝트에 등록된 업무가 없어요." small />
+                </div>
+              ) : (
+                <StatusColumns
+                  tasks={selectedProjectTasks}
+                  memberById={memberById}
+                  projectById={projectById}
+                  worklogTotalByTask={worklogTotalByTask}
+                  session={session}
+                  isAdmin={isAdmin}
+                  onEditTask={onEditTask}
+                  onAskDeleteTask={onAskDeleteTask}
+                  onSetStatus={onSetStatus}
+                  onLogTime={onLogTime}
+                  pendingDelete={pendingDelete}
+                  onCancelDelete={onCancelDelete}
+                />
+              )}
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function StatusColumns({
+  tasks,
+  memberById,
+  projectById,
+  worklogTotalByTask,
+  session,
+  isAdmin,
+  onEditTask,
+  onAskDeleteTask,
+  onSetStatus,
+  onLogTime,
+  pendingDelete,
+}) {
+  return (
+    <>
+      {STATUS_ORDER.map((status) => {
+        const columnTasks = tasks.filter((t) => t.status === status);
+        return (
+          <div key={status} className="ts-status-col">
+            <div className="ts-section-head">
+              <h2>
+                {STATUS_LABEL[status]} <span className="ts-col-count">{columnTasks.length}</span>
+              </h2>
+            </div>
+            {columnTasks.length === 0 ? (
+              <div className="ts-card ts-list-card">
+                <EmptyState label="이 상태의 업무가 없어요." small />
+              </div>
+            ) : (
+              <div className="ts-stack ts-tight">
+                {columnTasks.map((task) => (
+                  <TaskCard
+                    key={task.id}
+                    task={task}
+                    project={projectById[task.projectId]}
+                    assignee={memberById[task.assigneeId]}
+                    totalMinutes={worklogTotalByTask[task.id] || 0}
+                    canManage={isAdmin || task.assigneeId === session}
+                    confirming={pendingDelete?.type === "task" && pendingDelete.id === task.id}
+                    onEdit={() => onEditTask(task)}
+                    onAskDelete={() => onAskDeleteTask(task.id)}
+                    onSetStatus={(status) => onSetStatus(task.id, status)}
+                    onLogTime={() => onLogTime(task.id)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+function TaskCard({ task, project, assignee, totalMinutes, canManage, confirming, onEdit, onAskDelete, onSetStatus, onLogTime }) {
+  return (
+    <div className="ts-card ts-task-card">
+      <div className="ts-task-top">
+        <div className="ts-task-title-wrap">
+          <div className="ts-task-title">{task.title || "제목 없음"}</div>
+          <div className="ts-task-meta">
+            <span className="ts-dot ts-dot-inline" style={{ background: project?.color || "#C9C4BA" }} />
+            {project?.name || "삭제된 프로젝트"}
+            <span className="ts-task-meta-sep">·</span>
+            <MemberAvatar member={assignee} size={16} />
+            {assignee?.name || "미배정"}
+          </div>
+        </div>
+        <PriorityBadge priority={task.priority} />
+      </div>
+
+      <div className="ts-segmented ts-status-toggle">
+        {STATUS_ORDER.map((s) => (
+          <button
+            key={s}
+            type="button"
+            className={`ts-segmented-btn ${task.status === s ? "selected" : ""}`}
+            onClick={() => onSetStatus(s)}
+          >
+            {STATUS_LABEL[s]}
+          </button>
+        ))}
+      </div>
+
+      <div className="ts-task-bottom">
+        <button className="ts-time-chip" onClick={onLogTime}>
+          <Clock3 size={12} />
+          {fmtHM(totalMinutes)}
+        </button>
+        {canManage ? (
+          <div className="ts-task-actions">
+            <button className="ts-icon-btn" onClick={onEdit} aria-label="업무 수정">
+              <Pencil size={13} />
+            </button>
+            {confirming ? null : (
+              <button className="ts-icon-btn" onClick={onAskDelete} aria-label="업무 삭제">
+                <Trash2 size={13} />
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="ts-task-actions-spacer" />
+        )}
+      </div>
+    </div>
+  );
+}
+
+const HOUR_HEIGHT = 48; // px per hour
+const WEEKDAY_LABELS = ["일", "월", "화", "수", "목", "금", "토"];
+
+function layoutDayLogs(logs) {
+  const sorted = [...logs].sort((a, b) => a.startMinutes - b.startMinutes || a.endMinutes - b.endMinutes);
+  const columnEnds = [];
+  const placed = sorted.map((log) => {
+    let col = columnEnds.findIndex((end) => end <= log.startMinutes);
+    if (col === -1) {
+      col = columnEnds.length;
+      columnEnds.push(log.endMinutes);
+    } else {
+      columnEnds[col] = log.endMinutes;
+    }
+    return { ...log, col };
+  });
+  const totalCols = columnEnds.length || 1;
+  return placed.map((p) => ({ ...p, totalCols }));
+}
+
+function fmtFullDate(d) {
+  return d.toLocaleDateString("ko-KR", { month: "long", day: "numeric", weekday: "long" });
+}
+function fmtMonthLabel(d) {
+  return d.toLocaleDateString("ko-KR", { year: "numeric", month: "long" });
+}
+function participantsLabel(item, memberById) {
+  if (!item.participantIds || item.participantIds.length === 0) return "";
+  const names = item.participantIds.map((id) => memberById[id]?.name).filter(Boolean);
+  return names.length ? ` · 참여: ${names.join(", ")}` : "";
+}
+function addMonths(d, n) {
+  const r = new Date(d);
+  r.setDate(1); // 말일 넘어가는 것 방지
+  r.setMonth(r.getMonth() + n);
+  return r;
+}
+
+function TimesheetTab({
+  selectedDate,
+  setSelectedDate,
+  worklogs,
+  events,
+  tasks,
+  members,
+  memberById,
+  projectById,
+  session,
+  onEdit,
+  onCreate,
+  onEditEvent,
+  onCreateEvent,
+}) {
+  const [filterMemberId, setFilterMemberId] = useState(null);
+  const [view, setView] = useState("day"); // day | week | month
+  const [colorBy, setColorBy] = useState("project"); // project | member
+  const scrollRef = useRef(null);
+
+  const taskById = useMemo(() => {
+    const map = {};
+    tasks.forEach((t) => (map[t.id] = t));
+    return map;
+  }, [tasks]);
+
+  const dateKey = toKey(selectedDate);
+  const isToday = isSameDay(selectedDate, new Date());
+
+  const filteredLogs = useMemo(
+    () => worklogs.filter((w) => (filterMemberId ? w.memberId === filterMemberId : true) && w.startMinutes !== undefined),
+    [worklogs, filterMemberId]
+  );
+  const filteredEvents = useMemo(
+    () => events.filter((e) => (filterMemberId ? e.memberId === filterMemberId : true)),
+    [events, filterMemberId]
+  );
+
+  const dayLogs = useMemo(() => filteredLogs.filter((w) => w.dateKey === dateKey), [filteredLogs, dateKey]);
+  const dayEventsAll = useMemo(() => filteredEvents.filter((e) => eventOccursOn(e, dateKey)), [filteredEvents, dateKey]);
+  const dayAllDayEvents = useMemo(() => dayEventsAll.filter((e) => e.allDay), [dayEventsAll]);
+  const dayTimedEvents = useMemo(() => dayEventsAll.filter((e) => !e.allDay), [dayEventsAll]);
+  const dayTotal = dayLogs.reduce((s, w) => s + w.minutes, 0);
+  const laidOut = useMemo(
+    () => layoutDayLogs([...dayLogs.map((w) => ({ ...w, kind: "work" })), ...dayTimedEvents.map((e) => ({ ...e, kind: "event" }))]),
+    [dayLogs, dayTimedEvents]
+  );
+
+  useLayoutEffect(() => {
+    if ((view === "day" || view === "week") && scrollRef.current) scrollRef.current.scrollTop = Math.max(0, 7 * HOUR_HEIGHT - 40);
+  }, [dateKey, view]);
+
+  // 주간 그리드 (일요일 시작)
+  const weekStart = useMemo(() => addDays(selectedDate, -selectedDate.getDay()), [selectedDate]);
+  const weekDays = useMemo(() => Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)), [weekStart]);
+  const weekDayData = useMemo(
+    () =>
+      weekDays.map((d) => {
+        const key = toKey(d);
+        const logs = filteredLogs.filter((w) => w.dateKey === key);
+        const evsAll = filteredEvents.filter((e) => eventOccursOn(e, key));
+        const allDayEvs = evsAll.filter((e) => e.allDay);
+        const timedEvs = evsAll.filter((e) => !e.allDay);
+        return {
+          date: d,
+          key,
+          total: logs.reduce((s, w) => s + w.minutes, 0),
+          allDayEvents: allDayEvs,
+          laidOut: layoutDayLogs([...logs.map((w) => ({ ...w, kind: "work" })), ...timedEvs.map((e) => ({ ...e, kind: "event" }))]),
+        };
+      }),
+    [weekDays, filteredLogs, filteredEvents]
+  );
+  const weekTotal = weekDayData.reduce((s, d) => s + d.total, 0);
+
+  // 월간 그리드 (일요일 시작, 6주 고정)
+  const monthGridStart = useMemo(() => {
+    const first = new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1);
+    return addDays(first, -first.getDay());
+  }, [selectedDate]);
+  const monthDays = useMemo(() => Array.from({ length: 42 }, (_, i) => addDays(monthGridStart, i)), [monthGridStart]);
+  const monthLogsByDay = useMemo(() => {
+    const map = {};
+    monthDays.forEach((d) => {
+      const key = toKey(d);
+      const logs = filteredLogs.filter((w) => w.dateKey === key);
+      const evs = filteredEvents.filter((e) => eventOccursOn(e, key));
+      const total = logs.reduce((s, w) => s + w.minutes, 0);
+      const projectIds = [...new Set(logs.map((w) => taskById[w.taskId]?.projectId).filter(Boolean))];
+      const memberIds = [...new Set(logs.map((w) => w.memberId).filter(Boolean))];
+      map[key] = { total, projectIds, memberIds, events: evs };
+    });
+    return map;
+  }, [monthDays, filteredLogs, filteredEvents, taskById]);
+  const monthTotal = useMemo(
+    () => monthDays.filter((d) => d.getMonth() === selectedDate.getMonth()).reduce((s, d) => s + (monthLogsByDay[toKey(d)]?.total || 0), 0),
+    [monthDays, monthLogsByDay, selectedDate]
+  );
+
+  function goPrev() {
+    if (view === "day") setSelectedDate(addDays(selectedDate, -1));
+    else if (view === "week") setSelectedDate(addDays(selectedDate, -7));
+    else setSelectedDate(addMonths(selectedDate, -1));
+  }
+  function goNext() {
+    if (view === "day") setSelectedDate(addDays(selectedDate, 1));
+    else if (view === "week") setSelectedDate(addDays(selectedDate, 7));
+    else setSelectedDate(addMonths(selectedDate, 1));
+  }
+  const weekEnd = addDays(weekStart, 6);
+  const weekLabel = `${monthDay(weekStart)} – ${monthDay(weekEnd)}`;
+
+  return (
+    <div className="ts-stack">
+      <div className="ts-card">
+        <div className="ts-week-nav">
+          <button className="ts-icon-btn" onClick={goPrev} aria-label={view === "day" ? "이전 날" : view === "week" ? "이전 주" : "이전 달"}>
+            <ChevronLeft size={16} />
+          </button>
+          <div className="ts-week-label">
+            {view === "day" ? fmtFullDate(selectedDate) : view === "week" ? weekLabel : fmtMonthLabel(selectedDate)}
+            {view === "day" && isToday && <span className="ts-today-tag">오늘</span>}
+          </div>
+          <button className="ts-icon-btn" onClick={goNext} aria-label={view === "day" ? "다음 날" : view === "week" ? "다음 주" : "다음 달"}>
+            <ChevronRight size={16} />
+          </button>
+          <button className="ts-today-btn" onClick={() => setSelectedDate(new Date())}>
+            오늘
+          </button>
+          {view === "month" ? (
+            <input
+              type="month"
+              className="ts-jump-input"
+              value={`${selectedDate.getFullYear()}-${pad(selectedDate.getMonth() + 1)}`}
+              onChange={(e) => {
+                if (!e.target.value) return;
+                const [y, m] = e.target.value.split("-").map(Number);
+                setSelectedDate(new Date(y, m - 1, 1));
+              }}
+              aria-label="원하는 달로 이동"
+            />
+          ) : (
+            <input
+              type="date"
+              className="ts-jump-input"
+              value={dateKey}
+              onChange={(e) => {
+                if (!e.target.value) return;
+                const [y, m, d] = e.target.value.split("-").map(Number);
+                setSelectedDate(new Date(y, m - 1, d));
+              }}
+              aria-label="원하는 날짜로 이동"
+            />
+          )}
+        </div>
+
+        <div className="ts-view-toggle-row">
+          <div className="ts-view-toggle">
+            <button className={view === "day" ? "selected" : ""} onClick={() => setView("day")}>
+              일
+            </button>
+            <button className={view === "week" ? "selected" : ""} onClick={() => setView("week")}>
+              주
+            </button>
+            <button className={view === "month" ? "selected" : ""} onClick={() => setView("month")}>
+              월
+            </button>
+          </div>
+          <div className="ts-view-toggle ts-color-toggle">
+            <button className={colorBy === "project" ? "selected" : ""} onClick={() => setColorBy("project")}>
+              프로젝트별 색상
+            </button>
+            <button className={colorBy === "member" ? "selected" : ""} onClick={() => setColorBy("member")}>
+              팀원별 색상
+            </button>
+          </div>
+        </div>
+
+        {colorBy === "member" && members.length > 0 && (
+          <div className="ts-color-legend">
+            {members.map((m) => (
+              <span key={m.id} className="ts-color-legend-item">
+                <span className="ts-dot" style={{ background: m.color }} />
+                {m.name}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {colorBy === "project" && Object.keys(projectById).length > 0 && (
+          <div className="ts-color-legend">
+            {Object.values(projectById).map((p) => (
+              <span key={p.id} className="ts-color-legend-item">
+                <span className="ts-dot" style={{ background: p.color }} />
+                {p.name}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {members.length > 0 && (
+          <div className="ts-filter-row">
+            <button className={`ts-filter-chip ${filterMemberId === null ? "selected" : ""}`} onClick={() => setFilterMemberId(null)}>
+              전체
+            </button>
+            {members.map((m) => (
+              <button
+                key={m.id}
+                className={`ts-filter-chip ${filterMemberId === m.id ? "selected" : ""}`}
+                style={filterMemberId === m.id ? { background: m.color + "22", color: m.color, borderColor: m.color + "55" } : {}}
+                onClick={() => setFilterMemberId(m.id)}
+              >
+                {m.name}
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="ts-cal-summary">
+          <span className="ts-muted">
+            {view === "day" && `이 날 총 ${fmtHM(dayTotal)} 기록됨`}
+            {view === "week" && `이번 주 총 ${fmtHM(weekTotal)} 기록됨`}
+            {view === "month" && `이번 달 총 ${fmtHM(monthTotal)} 기록됨`}
+          </span>
+          {view === "day" && (
+            <div className="ts-cal-summary-actions">
+              <button className="ts-btn ts-btn-ghost ts-btn-small ts-btn-outline" onClick={() => onCreateEvent(dateKey)}>
+                <Plus size={14} />
+                이벤트
+              </button>
+              <button className="ts-btn ts-btn-start ts-btn-small" onClick={() => onCreate(dateKey)}>
+                <Plus size={14} />
+                기록 추가
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+
+      {view === "day" && dayAllDayEvents.length > 0 && (
+        <div className="ts-allday-block">
+          <div className="ts-allday-block-label">
+            <CalendarDays size={13} />
+            종일 일정 (일단위)
+          </div>
+          <div className="ts-allday-strip">
+            {dayAllDayEvents.map((e) => {
+              const cat = EVENT_CATEGORY_BY_ID[e.categoryId] || EVENT_CATEGORIES[EVENT_CATEGORIES.length - 1];
+              const member = memberById[e.memberId];
+              const own = e.memberId === session;
+              const chipColor = colorBy === "member" ? member?.color || "#C9C4BA" : cat.color;
+              return (
+                <button
+                  key={e.id}
+                  className="ts-allday-chip"
+                  style={{ background: chipColor + "1a", color: chipColor, borderColor: chipColor }}
+                  onClick={own ? () => onEditEvent(e) : undefined}
+                  disabled={!own}
+                  title={`[${cat.label}] ${e.title || "제목 없음"} · ${member?.name || ""}${participantsLabel(e, memberById)}`}
+                >
+                  <span className="ts-allday-chip-cat">{cat.label}</span>
+                  {e.title || "제목 없음"}
+                  {filterMemberId === null && ` · ${member?.name || ""}`}
+                  {e.participantIds?.length > 0 && ` +${e.participantIds.length}`}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {view === "day" && (
+        <div className="ts-cal-scroll" ref={scrollRef}>
+          <div className="ts-cal-body" style={{ height: 24 * HOUR_HEIGHT }}>
+            <div className="ts-cal-labels">
+              {Array.from({ length: 24 }, (_, h) => (
+                <div key={h} className="ts-cal-label" style={{ top: h * HOUR_HEIGHT }}>
+                  {pad(h)}:00
+                </div>
+              ))}
+            </div>
+            <div className="ts-cal-lines">
+              {Array.from({ length: 24 }, (_, h) => (
+                <div key={h} className="ts-cal-line" style={{ top: h * HOUR_HEIGHT }} />
+              ))}
+              {laidOut.length === 0 && (
+                <div className="ts-cal-empty">
+                  <EmptyState label="이 날 기록된 시간이 없어요." />
+                </div>
+              )}
+              {laidOut.map((log) => {
+                const top = (log.startMinutes / 60) * HOUR_HEIGHT;
+                const height = Math.max(18, ((log.endMinutes - log.startMinutes) / 60) * HOUR_HEIGHT);
+                const widthPct = 100 / log.totalCols;
+                const own = log.memberId === session;
+                const member = memberById[log.memberId];
+                const positionStyle = {
+                  top,
+                  height,
+                  left: `calc(${log.col * widthPct}% + 2px)`,
+                  width: `calc(${widthPct}% - 4px)`,
+                };
+
+                if (log.kind === "event") {
+                  const cat = EVENT_CATEGORY_BY_ID[log.categoryId] || EVENT_CATEGORIES[EVENT_CATEGORIES.length - 1];
+                  const evColor = colorBy === "member" ? member?.color || "#C9C4BA" : cat.color;
+                  return (
+                    <button
+                      key={log.id}
+                      className={`ts-cal-event ts-cal-event-type-event ${own ? "own" : ""}`}
+                      style={{ ...positionStyle, background: evColor + "1a", borderLeftColor: evColor }}
+                      onClick={own ? () => onEditEvent(log) : undefined}
+                      disabled={!own}
+                      title={`[${cat.label}] ${log.title || "제목 없음"} · ${member?.name || ""} · ${fmtTime(log.startMinutes)}–${fmtTime(log.endMinutes)}${participantsLabel(log, memberById)}`}
+                    >
+                      <span className="ts-cal-event-title">
+                        <span className="ts-cal-event-cat" style={{ color: evColor }}>
+                          {cat.label}
+                        </span>{" "}
+                        {log.title || "제목 없음"}
+                      </span>
+                      <span className="ts-cal-event-time">
+                        {fmtTime(log.startMinutes)}–{fmtTime(log.endMinutes)}
+                        {filterMemberId === null && ` · ${member?.name || ""}`}
+                        {log.participantIds?.length > 0 && ` · +${log.participantIds.length}명`}
+                      </span>
+                    </button>
+                  );
+                }
+
+                const task = taskById[log.taskId];
+                const project = projectById[task?.projectId];
+                const color = colorBy === "member" ? member?.color || "#C9C4BA" : project?.color || "#C9C4BA";
+                return (
+                  <button
+                    key={log.id}
+                    className={`ts-cal-event ${own ? "own" : ""}`}
+                    style={{ ...positionStyle, background: color + "26", borderLeftColor: color }}
+                    onClick={own ? () => onEdit(log) : undefined}
+                    disabled={!own}
+                    title={`${task?.title || "삭제된 업무"} · ${member?.name || ""} · ${fmtTime(log.startMinutes)}–${fmtTime(log.endMinutes)}`}
+                  >
+                    <span className="ts-cal-event-title">{task?.title || "삭제된 업무"}</span>
+                    <span className="ts-cal-event-time">
+                      {fmtTime(log.startMinutes)}–{fmtTime(log.endMinutes)}
+                      {filterMemberId === null && ` · ${member?.name || ""}`}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {view === "week" && (
+        <div className="ts-week-outer">
+          <div className="ts-week-inner">
+            <div className="ts-week-header-row">
+              <div className="ts-week-header-spacer" />
+              {weekDayData.map(({ date }) => {
+                const isDayToday = isSameDay(date, new Date());
+                return (
+                  <div key={toKey(date)} className={`ts-week-header-day ${isDayToday ? "today" : ""}`}>
+                    <span className="ts-week-header-dow">{weekdayShort(date)}</span>
+                    <span className="ts-week-header-num">{date.getDate()}</span>
+                  </div>
+                );
+              })}
+            </div>
+            {weekDayData.some((d) => d.allDayEvents.length > 0) && (
+              <div className="ts-allday-block">
+                <div className="ts-allday-block-label">
+                  <CalendarDays size={13} />
+                  종일 일정 (일단위)
+                </div>
+                <div className="ts-week-allday-row">
+                  <div className="ts-week-header-spacer" />
+                  {weekDayData.map(({ key, allDayEvents }) => (
+                    <div key={key} className="ts-week-allday-col">
+                      {allDayEvents.map((e) => {
+                        const cat = EVENT_CATEGORY_BY_ID[e.categoryId] || EVENT_CATEGORIES[EVENT_CATEGORIES.length - 1];
+                        const own = e.memberId === session;
+                        const chipColor = colorBy === "member" ? memberById[e.memberId]?.color || "#C9C4BA" : cat.color;
+                        return (
+                          <button
+                            key={e.id}
+                            className="ts-allday-chip ts-allday-chip-small"
+                            style={{ background: chipColor + "1a", color: chipColor, borderColor: chipColor }}
+                            onClick={own ? () => onEditEvent(e) : undefined}
+                            disabled={!own}
+                            title={`[${cat.label}] ${e.title || "제목 없음"}${participantsLabel(e, memberById)}`}
+                          >
+                            {e.title || cat.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="ts-cal-scroll" ref={scrollRef}>
+              <div className="ts-cal-body" style={{ height: 24 * HOUR_HEIGHT }}>
+                <div className="ts-cal-labels">
+                  {Array.from({ length: 24 }, (_, h) => (
+                    <div key={h} className="ts-cal-label" style={{ top: h * HOUR_HEIGHT }}>
+                      {pad(h)}:00
+                    </div>
+                  ))}
+                </div>
+                <div className="ts-week-days-grid">
+                  {weekDayData.map(({ key, laidOut: colLogs }) => (
+                    <div key={key} className="ts-week-daycol">
+                      {Array.from({ length: 24 }, (_, h) => (
+                        <div key={h} className="ts-cal-line" style={{ top: h * HOUR_HEIGHT }} />
+                      ))}
+                      {colLogs.map((log) => {
+                        const top = (log.startMinutes / 60) * HOUR_HEIGHT;
+                        const height = Math.max(16, ((log.endMinutes - log.startMinutes) / 60) * HOUR_HEIGHT);
+                        const widthPct = 100 / log.totalCols;
+                        const own = log.memberId === session;
+                        const positionStyle = {
+                          top,
+                          height,
+                          left: `calc(${log.col * widthPct}% + 1px)`,
+                          width: `calc(${widthPct}% - 2px)`,
+                        };
+
+                        if (log.kind === "event") {
+                          const cat = EVENT_CATEGORY_BY_ID[log.categoryId] || EVENT_CATEGORIES[EVENT_CATEGORIES.length - 1];
+                          const evColor = colorBy === "member" ? memberById[log.memberId]?.color || "#C9C4BA" : cat.color;
+                          return (
+                            <button
+                              key={log.id}
+                              className={`ts-cal-event ts-week-event ts-cal-event-type-event ${own ? "own" : ""}`}
+                              style={{ ...positionStyle, background: evColor + "1a", borderLeftColor: evColor }}
+                              onClick={own ? () => onEditEvent(log) : undefined}
+                              disabled={!own}
+                              title={`[${cat.label}] ${log.title || "제목 없음"} · ${fmtTime(log.startMinutes)}–${fmtTime(log.endMinutes)}${participantsLabel(log, memberById)}`}
+                            >
+                              <span className="ts-cal-event-title">{log.title || cat.label}</span>
+                            </button>
+                          );
+                        }
+
+                        const task = taskById[log.taskId];
+                        const project = projectById[task?.projectId];
+                        const color = colorBy === "member" ? memberById[log.memberId]?.color || "#C9C4BA" : project?.color || "#C9C4BA";
+                        return (
+                          <button
+                            key={log.id}
+                            className={`ts-cal-event ts-week-event ${own ? "own" : ""}`}
+                            style={{ ...positionStyle, background: color + "26", borderLeftColor: color }}
+                            onClick={own ? () => onEdit(log) : undefined}
+                            disabled={!own}
+                            title={`${task?.title || "삭제된 업무"} · ${fmtTime(log.startMinutes)}–${fmtTime(log.endMinutes)}`}
+                          >
+                            <span className="ts-cal-event-title">{task?.title || "삭제된 업무"}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {view === "month" && (
+        <div className="ts-month-wrap">
+          <div className="ts-month-weekdays">
+            {WEEKDAY_LABELS.map((w) => (
+              <div key={w} className="ts-month-weekday">
+                {w}
+              </div>
+            ))}
+          </div>
+          <div className="ts-month-days">
+            {monthDays.map((d) => {
+              const key = toKey(d);
+              const inMonth = d.getMonth() === selectedDate.getMonth();
+              const isDayToday = isSameDay(d, new Date());
+              const info = monthLogsByDay[key] || { total: 0, projectIds: [], memberIds: [], events: [] };
+              return (
+                <button
+                  key={key}
+                  className={`ts-month-cell ${inMonth ? "" : "muted"}`}
+                  onClick={() => {
+                    setSelectedDate(d);
+                    setView("day");
+                  }}
+                >
+                  <span className={`ts-month-daynum ${isDayToday ? "today" : ""}`}>{d.getDate()}</span>
+                  {info.total > 0 && <span className="ts-month-daytotal">{fmtHM(info.total)}</span>}
+                  {colorBy === "member"
+                    ? info.memberIds.length > 0 && (
+                        <span className="ts-month-dots">
+                          {info.memberIds.slice(0, 4).map((mid) => (
+                            <span key={mid} className="ts-dot" style={{ background: memberById[mid]?.color || "#C9C4BA" }} />
+                          ))}
+                        </span>
+                      )
+                    : info.projectIds.length > 0 && (
+                        <span className="ts-month-dots">
+                          {info.projectIds.slice(0, 4).map((pid) => (
+                            <span key={pid} className="ts-dot" style={{ background: projectById[pid]?.color || "#C9C4BA" }} />
+                          ))}
+                        </span>
+                      )}
+                  {info.events.length > 0 && (
+                    <span className="ts-month-events">
+                      {info.events.slice(0, 2).map((e) => {
+                        const cat = EVENT_CATEGORY_BY_ID[e.categoryId] || EVENT_CATEGORIES[EVENT_CATEGORIES.length - 1];
+                        const chipColor = colorBy === "member" ? memberById[e.memberId]?.color || "#C9C4BA" : cat.color;
+                        return (
+                          <span key={e.id} className="ts-month-event-chip" style={{ background: chipColor + "22", color: chipColor }}>
+                            {e.title || cat.label}
+                          </span>
+                        );
+                      })}
+                      {info.events.length > 2 && <span className="ts-month-event-more">+{info.events.length - 2}</span>}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProfileTab({ currentMember, departmentName, onSave, onChangePassword }) {
+  const [name, setName] = useState(currentMember?.name || "");
+  const [position, setPosition] = useState(currentMember?.position || "");
+  const [error, setError] = useState("");
+  const [savedFlash, setSavedFlash] = useState(false);
+
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [newPassword2, setNewPassword2] = useState("");
+  const [pwError, setPwError] = useState("");
+  const [pwSavedFlash, setPwSavedFlash] = useState(false);
+
+  useEffect(() => {
+    setName(currentMember?.name || "");
+    setPosition(currentMember?.position || "");
+  }, [currentMember?.id]); // eslint-disable-line
+
+  function handleSave() {
+    const result = onSave({ name, position });
+    if (!result?.ok) {
+      setError(result?.error || "저장하지 못했어요.");
+      return;
+    }
+    setError("");
+    setSavedFlash(true);
+    setTimeout(() => setSavedFlash(false), 1800);
+  }
+
+  function handleChangePassword() {
+    const result = onChangePassword({ currentPassword, newPassword, newPassword2 });
+    if (!result?.ok) {
+      setPwError(result?.error || "변경하지 못했어요.");
+      return;
+    }
+    setPwError("");
+    setCurrentPassword("");
+    setNewPassword("");
+    setNewPassword2("");
+    setPwSavedFlash(true);
+    setTimeout(() => setPwSavedFlash(false), 1800);
+  }
+
+  const dirty = name.trim() !== (currentMember?.name || "") || position.trim() !== (currentMember?.position || "");
+  const pwValid = currentPassword.length > 0 && newPassword.length >= 4 && newPassword === newPassword2;
+
+  return (
+    <div className="ts-stack">
+      <div className="ts-section-head">
+        <h2>내 정보</h2>
+      </div>
+
+      <div className="ts-card ts-profile-card">
+        <div className="ts-profile-head">
+          <MemberAvatar member={{ ...currentMember, name }} size={48} />
+          <div>
+            <div className="ts-profile-name-preview">{name || "이름 없음"}</div>
+            <div className="ts-muted">
+              {departmentName || "본부 미지정"} · {position || "직급 미지정"}
+              {currentMember?.role !== "member" && <span className="ts-admin-badge">{ROLE_LABEL[currentMember?.role]}</span>}
+            </div>
+            <div className="ts-muted">계정: @{currentMember?.username}</div>
+          </div>
+        </div>
+
+        <label className="ts-field-label">이름</label>
+        <input className="ts-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="이름" />
+
+        <label className="ts-field-label">직급</label>
+        <input className="ts-input" value={position} onChange={(e) => setPosition(e.target.value)} placeholder="예: 대리" />
+
+        {error && <div className="ts-auth-error">{error}</div>}
+        {savedFlash && <div className="ts-profile-saved">저장됐어요.</div>}
+
+        <div className="ts-modal-actions">
+          <button className="ts-btn ts-btn-start" onClick={handleSave} disabled={!name.trim() || !dirty}>
+            저장
+          </button>
+        </div>
+      </div>
+
+      <div className="ts-section-head">
+        <h2>비밀번호 변경</h2>
+      </div>
+      <div className="ts-card ts-profile-card">
+        <label className="ts-field-label">현재 비밀번호</label>
+        <input className="ts-input" type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} />
+
+        <div className="ts-modal-row">
+          <div>
+            <label className="ts-field-label">새 비밀번호</label>
+            <input className="ts-input" type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="4자 이상" />
+          </div>
+          <div>
+            <label className="ts-field-label">새 비밀번호 확인</label>
+            <input className="ts-input" type="password" value={newPassword2} onChange={(e) => setNewPassword2(e.target.value)} />
+          </div>
+        </div>
+
+        {pwError && <div className="ts-auth-error">{pwError}</div>}
+        {pwSavedFlash && <div className="ts-profile-saved">비밀번호가 변경됐어요.</div>}
+
+        <div className="ts-modal-actions">
+          <button className="ts-btn ts-btn-start" onClick={handleChangePassword} disabled={!pwValid}>
+            비밀번호 변경
+          </button>
+        </div>
+      </div>
+
+      <div className="ts-muted">본부, 계정, 관리자 권한 변경은 관리자에게 문의해주세요.</div>
+    </div>
+  );
+}
+
+function TeamTab({
+  members,
+  currentMember,
+  onToggleRole,
+  isSuper,
+  departments,
+  onAddDepartment,
+  viewingDepartmentId,
+  setViewingDepartmentId,
+  allMembers,
+  onReassignDepartment,
+  pendingDelete,
+  onAskDeleteMember,
+  onConfirmDeleteMember,
+  onAskDeleteDepartment,
+  onCancelDelete,
+}) {
+  const [newDeptName, setNewDeptName] = useState("");
+  const canManageThisDept = currentMember?.role === "super" || (currentMember?.role === "admin" && currentMember.departmentId === viewingDepartmentId);
+  const deptAdminCount = members.filter((m) => m.role === "admin").length;
+
+  return (
+    <div className="ts-stack">
+      {isSuper && (
+        <>
+          <div className="ts-section-head">
+            <h2>본부 관리</h2>
+          </div>
+          <div className="ts-card ts-new-project-card">
+            <div className="ts-muted">최고 관리자는 새 본부를 만들고 모든 본부를 관리할 수 있어요.</div>
+            <div className="ts-auth-pin-row">
+              <input className="ts-input" placeholder="새 본부 이름" value={newDeptName} onChange={(e) => setNewDeptName(e.target.value)} />
+              <button
+                className="ts-btn ts-btn-start"
+                onClick={() => {
+                  onAddDepartment(newDeptName);
+                  setNewDeptName("");
+                }}
+                disabled={!newDeptName.trim()}
+              >
+                본부 만들기
+              </button>
+            </div>
+            {departments.length > 0 && (
+              <div className="ts-filter-row">
+                {departments.map((d) => (
+                  <span key={d.id} className="ts-dept-chip-wrap">
+                    <button
+                      className={`ts-filter-chip ${viewingDepartmentId === d.id ? "selected" : ""}`}
+                      onClick={() => setViewingDepartmentId(d.id)}
+                    >
+                      {d.name}
+                    </button>
+                    <button
+                      className="ts-icon-btn ts-dept-delete-btn"
+                      onClick={() => onAskDeleteDepartment(d.id)}
+                      aria-label={`${d.name} 삭제`}
+                      title="본부 삭제"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {isSuper && (
+        <>
+          <div className="ts-section-head">
+            <h2>전체 팀원 현황</h2>
+          </div>
+          <div className="ts-card ts-list-card">
+            {allMembers.filter((m) => m.role === "super").map((m) => (
+              <div className="ts-project-row" key={m.id}>
+                <MemberAvatar member={m} size={24} />
+                <div className="ts-project-info">
+                  <div className="ts-project-name">
+                    {m.name}
+                    <span className="ts-admin-badge">{ROLE_LABEL[m.role]}</span>
+                  </div>
+                  <div className="ts-muted ts-project-client">@{m.username} · 본부 없음 (전체 관리)</div>
+                </div>
+              </div>
+            ))}
+            {allMembers
+              .filter((m) => m.role !== "super")
+              .map((m) => (
+                <div className="ts-project-row" key={m.id}>
+                  <MemberAvatar member={m} size={24} />
+                  <div className="ts-project-info">
+                    <div className="ts-project-name">
+                      {m.name}
+                      {m.role !== "member" && <span className="ts-admin-badge">{ROLE_LABEL[m.role]}</span>}
+                    </div>
+                    <div className="ts-muted ts-project-client">
+                      {[m.position, `@${m.username}`].filter(Boolean).join(" · ")}
+                    </div>
+                  </div>
+                  <select
+                    className="ts-select ts-dept-reassign"
+                    value={m.departmentId || ""}
+                    onChange={(e) => onReassignDepartment(m.id, e.target.value)}
+                  >
+                    {departments.length === 0 && <option value="">본부 없음</option>}
+                    {departments.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ))}
+            {allMembers.length === 0 && <EmptyState label="가입된 계정이 없어요." />}
+          </div>
+          <div className="ts-muted">본부를 바꾸면 이전 본부에서 가지고 있던 관리자 권한은 초기화돼요.</div>
+        </>
+      )}
+
+      <div className="ts-section-head">
+        <h2>{isSuper ? `${departments.find((d) => d.id === viewingDepartmentId)?.name || "선택한 본부"} 팀원` : "팀원"}</h2>
+      </div>
+      <div className="ts-card ts-list-card">
+        {members.length === 0 ? (
+          <EmptyState label="이 본부에 소속된 팀원이 없어요." />
+        ) : (
+          members.map((m) => {
+            const isLastDeptAdmin = m.role === "admin" && deptAdminCount <= 1;
+            const confirming = pendingDelete?.type === "member" && pendingDelete.id === m.id;
+            return (
+              <div className="ts-project-row" key={m.id}>
+                <MemberAvatar member={m} size={24} />
+                <div className="ts-project-info">
+                  <div className="ts-project-name">
+                    {m.name}
+                    {m.role !== "member" && <span className="ts-admin-badge">{ROLE_LABEL[m.role]}</span>}
+                  </div>
+                  {(m.position || m.username) && (
+                    <div className="ts-muted ts-project-client">{[m.position, m.username && `@${m.username}`].filter(Boolean).join(" · ")}</div>
+                  )}
+                </div>
+                {canManageThisDept && (
+                  <button
+                    className="ts-today-btn"
+                    onClick={() => onToggleRole(m.id)}
+                    disabled={isLastDeptAdmin}
+                    title={isLastDeptAdmin ? "이 본부의 마지막 관리자는 해제할 수 없어요" : undefined}
+                  >
+                    {m.role === "admin" ? "관리자 해제" : "관리자로 지정"}
+                  </button>
+                )}
+                {canManageThisDept && m.role !== "super" && (
+                  confirming ? (
+                    <div className="ts-confirm-row">
+                      <button className="ts-icon-btn danger" onClick={() => onConfirmDeleteMember(m.id)} aria-label="삭제 확인">
+                        <Check size={14} />
+                      </button>
+                      <button className="ts-icon-btn" onClick={onCancelDelete} aria-label="삭제 취소">
+                        <X size={14} />
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      className="ts-icon-btn"
+                      onClick={() => onAskDeleteMember(m.id)}
+                      disabled={isLastDeptAdmin}
+                      title={isLastDeptAdmin ? "이 본부의 마지막 관리자는 삭제할 수 없어요" : "계정 삭제"}
+                      aria-label="계정 삭제"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  )
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+      {!canManageThisDept && <div className="ts-muted">본부 관리자만 이 본부의 팀원 권한을 바꿀 수 있어요.</div>}
+    </div>
+  );
+}
+
+function ProjectsTab({
+  projects,
+  tasks,
+  worklogs,
+  onOpenDetail,
+  newProjectOpen,
+  setNewProjectOpen,
+  draftProject,
+  setDraftProject,
+  onAdd,
+  pendingDelete,
+  onAskDelete,
+  onConfirmDelete,
+  onCancelDelete,
+}) {
+  const totalsByProject = useMemo(() => {
+    const taskProject = {};
+    tasks.forEach((t) => (taskProject[t.id] = t.projectId));
+    const map = {};
+    worklogs.forEach((w) => {
+      const pid = taskProject[w.taskId];
+      if (!pid) return;
+      map[pid] = (map[pid] || 0) + w.minutes;
+    });
+    return map;
+  }, [tasks, worklogs]);
+
+  return (
+    <div className="ts-stack">
+      <div className="ts-section-head">
+        <h2>프로젝트</h2>
+        <button className="ts-add-mini" onClick={() => setNewProjectOpen((v) => !v)} aria-label="프로젝트 추가">
+          <Plus size={14} />
+        </button>
+      </div>
+
+      {newProjectOpen && (
+        <div className="ts-card ts-new-project-card">
+          <input className="ts-input" placeholder="프로젝트 이름" value={draftProject.name} onChange={(e) => setDraftProject((p) => ({ ...p, name: e.target.value }))} autoFocus />
+          <input className="ts-input" placeholder="클라이언트 (선택)" value={draftProject.client} onChange={(e) => setDraftProject((p) => ({ ...p, client: e.target.value }))} />
+          <div className="ts-swatches">
+            {PALETTE.map((c) => (
+              <button key={c} className={`ts-swatch ${draftProject.color === c ? "selected" : ""}`} style={{ background: c }} onClick={() => setDraftProject((p) => ({ ...p, color: c }))} aria-label={`색상 ${c}`} />
+            ))}
+          </div>
+          <div className="ts-modal-actions">
+            <button className="ts-btn ts-btn-ghost" onClick={() => setNewProjectOpen(false)}>
+              취소
+            </button>
+            <button className="ts-btn ts-btn-start" onClick={onAdd} disabled={!draftProject.name.trim()}>
+              프로젝트 추가
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="ts-card ts-list-card">
+        {projects.length === 0 ? (
+          <EmptyState label="아직 프로젝트가 없어요. 추가해서 업무를 만들어보세요." />
+        ) : (
+          projects.map((p) => {
+            const confirming = pendingDelete?.type === "project" && pendingDelete.id === p.id;
+            return (
+              <div className="ts-project-row ts-project-row-clickable" key={p.id} onClick={() => onOpenDetail(p.id)} role="button" tabIndex={0}>
+                <span className="ts-dot" style={{ background: p.color }} />
+                <div className="ts-project-info">
+                  <div className="ts-project-name">{p.name}</div>
+                  {p.client && <div className="ts-muted ts-project-client">{p.client}</div>}
+                </div>
+                <div className="ts-project-total">{fmtHM(totalsByProject[p.id] || 0)}</div>
+                {confirming ? (
+                  <div className="ts-confirm-row" onClick={(e) => e.stopPropagation()}>
+                    <button className="ts-icon-btn danger" onClick={() => onConfirmDelete(p.id)} aria-label="삭제 확인">
+                      <Check size={14} />
+                    </button>
+                    <button className="ts-icon-btn" onClick={onCancelDelete} aria-label="삭제 취소">
+                      <X size={14} />
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    className="ts-icon-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onAskDelete(p.id);
+                    }}
+                    aria-label="프로젝트 삭제"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
+
+function WorklogRow({ worklog, task, project, member, own, onEdit, onAskDelete, confirming, onConfirmDelete, onCancelDelete }) {
+  return (
+    <div className="ts-entry-row">
+      <MemberAvatar member={member} size={24} />
+      <div className="ts-entry-info" onClick={own ? onEdit : undefined} role={own ? "button" : undefined} tabIndex={own ? 0 : undefined} style={{ cursor: own ? "pointer" : "default" }}>
+        <div className="ts-entry-desc">{task?.title || "삭제된 업무"}</div>
+        <div className="ts-muted ts-entry-project">
+          {worklog.startMinutes !== undefined && (
+            <span className="ts-time-range">
+              {fmtTime(worklog.startMinutes)}–{fmtTime(worklog.endMinutes)}
+            </span>
+          )}
+          <span className="ts-dot ts-dot-inline" style={{ background: project?.color || "#C9C4BA" }} />
+          {member?.name || "삭제된 팀원"} · {project?.name || "삭제된 프로젝트"}
+          {worklog.note && ` · ${worklog.note}`}
+        </div>
+      </div>
+      <div className="ts-entry-time">{fmtHM(worklog.minutes)}</div>
+      {own ? (
+        confirming ? (
+          <div className="ts-confirm-row">
+            <button className="ts-icon-btn danger" onClick={onConfirmDelete} aria-label="삭제 확인">
+              <Check size={14} />
+            </button>
+            <button className="ts-icon-btn" onClick={onCancelDelete} aria-label="삭제 취소">
+              <X size={14} />
+            </button>
+          </div>
+        ) : (
+          <div className="ts-entry-actions">
+            <button className="ts-icon-btn" onClick={onEdit} aria-label="기록 수정">
+              <Pencil size={13} />
+            </button>
+            <button className="ts-icon-btn" onClick={onAskDelete} aria-label="기록 삭제">
+              <Trash2 size={13} />
+            </button>
+          </div>
+        )
+      ) : (
+        <div className="ts-entry-actions-spacer" />
+      )}
+    </div>
+  );
+}
+
+function EmptyState({ label, small }) {
+  return <div className={`ts-empty ${small ? "small" : ""}`}>{label}</div>;
+}
+
+function TaskModal({ modal, projects, members, isAdmin, onClose, onSave }) {
+  const { task } = modal;
+  const [title, setTitle] = useState(task.title || "");
+  const [projectId, setProjectId] = useState(task.projectId || projects[0]?.id || "");
+  const [assigneeId] = useState(task.assigneeId || members[0]?.id || ""); // 담당자는 관리자만 변경 가능
+  const [status, setStatus] = useState(task.status || "todo");
+  const [priority, setPriority] = useState(task.priority || "medium");
+  const memberById = useMemo(() => {
+    const map = {};
+    members.forEach((m) => (map[m.id] = m));
+    return map;
+  }, [members]);
+  const [adminAssigneeId, setAdminAssigneeId] = useState(assigneeId);
+
+  function handleSave() {
+    if (!title.trim()) return;
+    onSave({ ...task, title: title.trim(), projectId, assigneeId: isAdmin ? adminAssigneeId : assigneeId, status, priority });
+  }
+
+  return (
+    <div className="ts-modal-backdrop" onClick={onClose}>
+      <div className="ts-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="ts-modal-head">
+          <h3>{modal.mode === "create" ? "새 업무" : "업무 수정"}</h3>
+          <button className="ts-icon-btn" onClick={onClose} aria-label="닫기">
+            <X size={16} />
+          </button>
+        </div>
+
+        <label className="ts-field-label">제목</label>
+        <input className="ts-input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="예: 결제 페이지 QA" autoFocus />
+
+        <div className="ts-modal-row">
+          <div>
+            <label className="ts-field-label">프로젝트</label>
+            <select className="ts-select ts-select-full" value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="ts-field-label">담당자</label>
+            {isAdmin ? (
+              <select className="ts-select ts-select-full" value={adminAssigneeId} onChange={(e) => setAdminAssigneeId(e.target.value)}>
+                {members.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <div className="ts-locked-field">
+                <MemberAvatar member={memberById[assigneeId]} size={20} />
+                {memberById[assigneeId]?.name || "미배정"}
+              </div>
+            )}
+          </div>
+        </div>
+        {!isAdmin && <div className="ts-muted">담당자는 관리자만 지정하거나 바꿀 수 있어요.</div>}
+
+        <label className="ts-field-label">상태</label>
+        <div className="ts-segmented">
+          {STATUS_ORDER.map((s) => (
+            <button key={s} type="button" className={`ts-segmented-btn ${status === s ? "selected" : ""}`} onClick={() => setStatus(s)}>
+              {STATUS_LABEL[s]}
+            </button>
+          ))}
+        </div>
+
+        <label className="ts-field-label">우선순위</label>
+        <div className="ts-segmented">
+          {["low", "medium", "high"].map((p) => (
+            <button key={p} type="button" className={`ts-segmented-btn ${priority === p ? "selected" : ""}`} onClick={() => setPriority(p)}>
+              {PRIORITY_LABEL[p]}
+            </button>
+          ))}
+        </div>
+
+        <div className="ts-modal-actions">
+          <button className="ts-btn ts-btn-ghost" onClick={onClose}>
+            취소
+          </button>
+          <button className="ts-btn ts-btn-start" onClick={handleSave} disabled={!title.trim() || !projectId || !assigneeId}>
+            저장
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WorklogModal({ modal, tasks, projects, projectById, session, currentMember, onClose, onSave, onDelete }) {
+  const { worklog } = modal;
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const initialTask = tasks.find((t) => t.id === worklog.taskId);
+  const [projectId, setProjectId] = useState(initialTask?.projectId || projects[0]?.id || "");
+  const [taskId, setTaskId] = useState(worklog.taskId || "");
+  const [date, setDate] = useState(worklog.dateKey);
+  const [startMinutes, setStartMinutes] = useState(worklog.startMinutes ?? 540);
+  const [endMinutes, setEndMinutes] = useState(worklog.endMinutes ?? (worklog.startMinutes ?? 540) + (worklog.minutes || 60));
+  const [note, setNote] = useState(worklog.note || "");
+
+  const tasksInProject = useMemo(() => tasks.filter((t) => t.projectId === projectId), [tasks, projectId]);
+
+  function handleProjectChange(newProjectId) {
+    setProjectId(newProjectId);
+    const stillValid = taskId && tasks.find((t) => t.id === taskId)?.projectId === newProjectId;
+    if (!stillValid) {
+      const firstTask = tasks.find((t) => t.projectId === newProjectId);
+      setTaskId(firstTask?.id || "");
+    }
+  }
+
+  const duration = endMinutes - startMinutes;
+  const valid = duration > 0;
+
+  function handleStartChange(v) {
+    const next = Number(v);
+    setStartMinutes(next);
+    if (endMinutes <= next) setEndMinutes(Math.min(1430, next + 10));
+  }
+
+  function handleSave() {
+    if (!valid || !taskId) return;
+    onSave({ ...worklog, taskId, memberId: session, dateKey: date, startMinutes, endMinutes, minutes: duration, note: note.trim() });
+  }
+
+  return (
+    <div className="ts-modal-backdrop" onClick={onClose}>
+      <div className="ts-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="ts-modal-head">
+          <h3>{modal.mode === "create" ? "시간 기록" : "기록 수정"}</h3>
+          <button className="ts-icon-btn" onClick={onClose} aria-label="닫기">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="ts-timer-who">
+          <MemberAvatar member={currentMember} size={22} />
+          <span>{currentMember?.name}님의 기록으로 저장돼요</span>
+        </div>
+
+        <label className="ts-field-label">프로젝트</label>
+        <select className="ts-select ts-select-full" value={projectId} onChange={(e) => handleProjectChange(e.target.value)}>
+          {projects.length === 0 && <option value="">프로젝트 없음</option>}
+          {projects.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+
+        <label className="ts-field-label">세부업무</label>
+        <select className="ts-select ts-select-full" value={taskId} onChange={(e) => setTaskId(e.target.value)} disabled={tasksInProject.length === 0}>
+          {tasksInProject.length === 0 && <option value="">이 프로젝트에 등록된 업무가 없어요</option>}
+          {tasksInProject.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.title}
+            </option>
+          ))}
+        </select>
+        <div className="ts-muted">담당자가 아니어도 이 업무에 시간을 기록할 수 있어요.</div>
+
+        <label className="ts-field-label">날짜</label>
+        <input className="ts-input" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+
+        <div className="ts-modal-row">
+          <div>
+            <label className="ts-field-label">시작</label>
+            <select className="ts-select ts-select-full" value={startMinutes} onChange={(e) => handleStartChange(e.target.value)}>
+              {TIME_OPTIONS.map((m) => (
+                <option key={m} value={m}>
+                  {fmtTime(m)}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="ts-field-label">종료</label>
+            <select className="ts-select ts-select-full" value={endMinutes} onChange={(e) => setEndMinutes(Number(e.target.value))}>
+              {TIME_OPTIONS.map((m) => (
+                <option key={m} value={m}>
+                  {fmtTime(m)}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {valid ? (
+          <div className="ts-muted">총 {fmtHM(duration)} 기록돼요</div>
+        ) : (
+          <div className="ts-auth-error">종료 시간은 시작 시간보다 늦어야 해요.</div>
+        )}
+
+        <label className="ts-field-label">메모 (선택)</label>
+        <input className="ts-input" value={note} onChange={(e) => setNote(e.target.value)} placeholder="예: PR 리뷰까지 완료" />
+
+        <div className="ts-modal-actions ts-modal-actions-with-delete">
+          {modal.mode === "edit" && onDelete ? (
+            <div className="ts-modal-delete">
+              {confirmingDelete ? (
+                <>
+                  <span className="ts-muted">삭제할까요?</span>
+                  <button className="ts-icon-btn danger" onClick={() => onDelete(worklog.id)} aria-label="삭제 확인">
+                    <Check size={14} />
+                  </button>
+                  <button className="ts-icon-btn" onClick={() => setConfirmingDelete(false)} aria-label="삭제 취소">
+                    <X size={14} />
+                  </button>
+                </>
+              ) : (
+                <button className="ts-icon-btn" onClick={() => setConfirmingDelete(true)} aria-label="기록 삭제">
+                  <Trash2 size={14} />
+                </button>
+              )}
+            </div>
+          ) : (
+            <span />
+          )}
+          <div className="ts-modal-actions-right">
+            <button className="ts-btn ts-btn-ghost" onClick={onClose}>
+              취소
+            </button>
+            <button className="ts-btn ts-btn-start" onClick={handleSave} disabled={!taskId || !valid}>
+              저장
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EventModal({ modal, session, currentMember, members, memberById, onClose, onSave, onDelete }) {
+  const { event } = modal;
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [categoryId, setCategoryId] = useState(event.categoryId || EVENT_CATEGORIES[0].id);
+  const [title, setTitle] = useState(event.title || "");
+  const [allDay, setAllDay] = useState(!!event.allDay);
+  const [date, setDate] = useState(event.dateKey);
+  const [endDate, setEndDate] = useState(event.endDateKey || event.dateKey);
+  const [startMinutes, setStartMinutes] = useState(event.startMinutes ?? 600);
+  const [endMinutes, setEndMinutes] = useState(event.endMinutes ?? (event.startMinutes ?? 600) + 60);
+  const [note, setNote] = useState(event.note || "");
+  const [participantIds, setParticipantIds] = useState(event.participantIds || []);
+
+  const duration = endMinutes - startMinutes;
+  const timeValid = allDay || duration > 0;
+  const dateValid = !allDay || endDate >= date;
+  const valid = timeValid && dateValid;
+
+  function toggleParticipant(id) {
+    setParticipantIds((prev) => (prev.includes(id) ? prev.filter((p) => p !== id) : [...prev, id]));
+  }
+
+  function handleStartChange(v) {
+    const next = Number(v);
+    setStartMinutes(next);
+    if (endMinutes <= next) setEndMinutes(Math.min(1430, next + 10));
+  }
+
+  function handleSave() {
+    if (!valid || !title.trim()) return;
+    if (allDay) {
+      onSave({ ...event, categoryId, title: title.trim(), memberId: session, dateKey: date, endDateKey: endDate, allDay: true, startMinutes: undefined, endMinutes: undefined, note: note.trim(), participantIds });
+    } else {
+      onSave({ ...event, categoryId, title: title.trim(), memberId: session, dateKey: date, endDateKey: undefined, allDay: false, startMinutes, endMinutes, note: note.trim(), participantIds });
+    }
+  }
+
+  const otherMembers = members.filter((m) => m.id !== session);
+
+  return (
+    <div className="ts-modal-backdrop" onClick={onClose}>
+      <div className="ts-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="ts-modal-head">
+          <h3>{modal.mode === "create" ? "이벤트 기록" : "이벤트 수정"}</h3>
+          <button className="ts-icon-btn" onClick={onClose} aria-label="닫기">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="ts-timer-who">
+          <MemberAvatar member={currentMember} size={22} />
+          <span>{currentMember?.name}님의 기록으로 저장돼요 · 본부 전체에 공유돼요</span>
+        </div>
+
+        <label className="ts-field-label">구분</label>
+        <div className="ts-segmented ts-cat-segmented">
+          {EVENT_CATEGORIES.map((c) => (
+            <button
+              key={c.id}
+              type="button"
+              className={`ts-segmented-btn ${categoryId === c.id ? "selected" : ""}`}
+              style={categoryId === c.id ? { background: c.color + "22", color: c.color } : {}}
+              onClick={() => setCategoryId(c.id)}
+            >
+              {c.label}
+            </button>
+          ))}
+        </div>
+
+        <label className="ts-field-label">제목</label>
+        <input className="ts-input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="예: OO현장 실시설계 협의" autoFocus />
+
+        <div className="ts-segmented ts-allday-toggle">
+          <button type="button" className={`ts-segmented-btn ${!allDay ? "selected" : ""}`} onClick={() => setAllDay(false)}>
+            시간 지정
+          </button>
+          <button type="button" className={`ts-segmented-btn ${allDay ? "selected" : ""}`} onClick={() => setAllDay(true)}>
+            종일 (일단위)
+          </button>
+        </div>
+
+        {allDay ? (
+          <div className="ts-modal-row">
+            <div>
+              <label className="ts-field-label">시작일</label>
+              <input className="ts-input" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            </div>
+            <div>
+              <label className="ts-field-label">종료일</label>
+              <input className="ts-input" type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+            </div>
+          </div>
+        ) : (
+          <>
+            <label className="ts-field-label">날짜</label>
+            <input className="ts-input" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+
+            <div className="ts-modal-row">
+              <div>
+                <label className="ts-field-label">시작</label>
+                <select className="ts-select ts-select-full" value={startMinutes} onChange={(e) => handleStartChange(e.target.value)}>
+                  {TIME_OPTIONS.map((m) => (
+                    <option key={m} value={m}>
+                      {fmtTime(m)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="ts-field-label">종료</label>
+                <select className="ts-select ts-select-full" value={endMinutes} onChange={(e) => setEndMinutes(Number(e.target.value))}>
+                  {TIME_OPTIONS.map((m) => (
+                    <option key={m} value={m}>
+                      {fmtTime(m)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </>
+        )}
+
+        {!valid && !allDay && <div className="ts-auth-error">종료 시간은 시작 시간보다 늦어야 해요.</div>}
+        {!valid && allDay && <div className="ts-auth-error">종료일은 시작일과 같거나 이후여야 해요.</div>}
+        {valid && !allDay && <div className="ts-muted">총 {fmtHM(duration)} 일정이에요</div>}
+        {valid && allDay && <div className="ts-muted">총 {dateRangeDays(date, endDate)}일간 종일 일정이에요</div>}
+
+        <label className="ts-field-label">참여자 (선택)</label>
+        {otherMembers.length === 0 ? (
+          <div className="ts-muted">함께 등록할 다른 팀원이 없어요.</div>
+        ) : (
+          <div className="ts-participant-grid">
+            {otherMembers.map((m) => {
+              const selected = participantIds.includes(m.id);
+              return (
+                <button
+                  key={m.id}
+                  type="button"
+                  className={`ts-participant-chip ${selected ? "selected" : ""}`}
+                  onClick={() => toggleParticipant(m.id)}
+                >
+                  <MemberAvatar member={m} size={20} />
+                  {m.name}
+                  {selected && <Check size={12} />}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        <label className="ts-field-label">메모 (선택)</label>
+        <input className="ts-input" value={note} onChange={(e) => setNote(e.target.value)} placeholder="예: 3층 회의실, 담당자 A 참석" />
+
+        <div className="ts-modal-actions ts-modal-actions-with-delete">
+          {modal.mode === "edit" && onDelete ? (
+            <div className="ts-modal-delete">
+              {confirmingDelete ? (
+                <>
+                  <span className="ts-muted">삭제할까요?</span>
+                  <button className="ts-icon-btn danger" onClick={() => onDelete(event.id)} aria-label="삭제 확인">
+                    <Check size={14} />
+                  </button>
+                  <button className="ts-icon-btn" onClick={() => setConfirmingDelete(false)} aria-label="삭제 취소">
+                    <X size={14} />
+                  </button>
+                </>
+              ) : (
+                <button className="ts-icon-btn" onClick={() => setConfirmingDelete(true)} aria-label="이벤트 삭제">
+                  <Trash2 size={14} />
+                </button>
+              )}
+            </div>
+          ) : (
+            <span />
+          )}
+          <div className="ts-modal-actions-right">
+            <button className="ts-btn ts-btn-ghost" onClick={onClose}>
+              취소
+            </button>
+            <button className="ts-btn ts-btn-start" onClick={handleSave} disabled={!title.trim() || !valid}>
+              저장
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ScheduleTab({ leaves, members, memberById, session, onNew, onEdit }) {
+  const [filterMemberId, setFilterMemberId] = useState(null);
+  const todayKey = toKey(new Date());
+
+  const filtered = filterMemberId ? leaves.filter((l) => l.memberId === filterMemberId) : leaves;
+
+  const todayList = filtered.filter((l) => todayKey >= l.startDateKey && todayKey <= l.endDateKey);
+
+  const sorted = [...filtered].sort((a, b) => (a.startDateKey < b.startDateKey ? 1 : -1));
+  const upcoming = sorted.filter((l) => l.endDateKey >= todayKey);
+  const past = sorted.filter((l) => l.endDateKey < todayKey);
+
+  function rangeLabel(l) {
+    const days = dateRangeDays(l.startDateKey, l.endDateKey);
+    if (l.startDateKey === l.endDateKey) return `${monthDay(parseDateKey(l.startDateKey))} (${days}일)`;
+    return `${monthDay(parseDateKey(l.startDateKey))} – ${monthDay(parseDateKey(l.endDateKey))} (${days}일)`;
+  }
+
+  function LeaveRow({ l }) {
+    const member = memberById[l.memberId];
+    const type = LEAVE_TYPE_BY_ID[l.typeId] || LEAVE_TYPES[LEAVE_TYPES.length - 1];
+    const own = l.memberId === session;
+    return (
+      <div className="ts-entry-row">
+        <MemberAvatar member={member} size={24} />
+        <div className="ts-entry-info" onClick={own ? () => onEdit(l) : undefined} role={own ? "button" : undefined} tabIndex={own ? 0 : undefined} style={{ cursor: own ? "pointer" : "default" }}>
+          <div className="ts-entry-desc">
+            <span className="ts-leave-type-badge" style={{ background: type.color + "22", color: type.color }}>
+              {type.label}
+            </span>{" "}
+            {member?.name || "삭제된 팀원"}
+          </div>
+          <div className="ts-muted ts-entry-project">
+            {rangeLabel(l)}
+            {l.note && ` · ${l.note}`}
+          </div>
+        </div>
+        {own && (
+          <button className="ts-icon-btn" onClick={() => onEdit(l)} aria-label="일정 수정">
+            <Pencil size={13} />
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="ts-stack">
+      <div className="ts-section-head">
+        <h2>휴가 · 출장 일정</h2>
+        <button className="ts-btn ts-btn-start ts-btn-small" onClick={onNew}>
+          <Plus size={14} />
+          일정 등록
+        </button>
+      </div>
+
+      {members.length > 0 && (
+        <div className="ts-filter-row">
+          <button className={`ts-filter-chip ${filterMemberId === null ? "selected" : ""}`} onClick={() => setFilterMemberId(null)}>
+            전체
+          </button>
+          {members.map((m) => (
+            <button
+              key={m.id}
+              className={`ts-filter-chip ${filterMemberId === m.id ? "selected" : ""}`}
+              style={filterMemberId === m.id ? { background: m.color + "22", color: m.color, borderColor: m.color + "55" } : {}}
+              onClick={() => setFilterMemberId(m.id)}
+            >
+              {m.name}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="ts-section-head">
+        <h2>오늘 휴가 · 출장 중</h2>
+      </div>
+      <div className="ts-card ts-list-card">
+        {todayList.length === 0 ? (
+          <EmptyState label="오늘 휴가·출장 중인 팀원이 없어요." small />
+        ) : (
+          todayList.map((l) => <LeaveRow key={l.id} l={l} />)
+        )}
+      </div>
+
+      <div className="ts-section-head">
+        <h2>예정된 일정</h2>
+      </div>
+      <div className="ts-card ts-list-card">
+        {upcoming.length === 0 ? <EmptyState label="예정된 휴가·출장이 없어요." /> : upcoming.map((l) => <LeaveRow key={l.id} l={l} />)}
+      </div>
+
+      {past.length > 0 && (
+        <>
+          <div className="ts-section-head">
+            <h2>지난 일정</h2>
+          </div>
+          <div className="ts-card ts-list-card">
+            {past.map((l) => (
+              <LeaveRow key={l.id} l={l} />
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function LeaveModal({ modal, session, currentMember, onClose, onSave, onDelete }) {
+  const { leave } = modal;
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [typeId, setTypeId] = useState(leave.typeId || LEAVE_TYPES[0].id);
+  const [startDate, setStartDate] = useState(leave.startDateKey);
+  const [endDate, setEndDate] = useState(leave.endDateKey || leave.startDateKey);
+  const [note, setNote] = useState(leave.note || "");
+
+  const valid = endDate >= startDate;
+
+  function handleSave() {
+    if (!valid) return;
+    onSave({ ...leave, typeId, memberId: session, startDateKey: startDate, endDateKey: endDate, note: note.trim() });
+  }
+
+  return (
+    <div className="ts-modal-backdrop" onClick={onClose}>
+      <div className="ts-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="ts-modal-head">
+          <h3>{modal.mode === "create" ? "휴가 · 출장 등록" : "일정 수정"}</h3>
+          <button className="ts-icon-btn" onClick={onClose} aria-label="닫기">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="ts-timer-who">
+          <MemberAvatar member={currentMember} size={22} />
+          <span>{currentMember?.name}님의 일정으로 저장돼요 · 본부 전체에 공유돼요</span>
+        </div>
+
+        <label className="ts-field-label">구분</label>
+        <div className="ts-segmented">
+          {LEAVE_TYPES.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              className={`ts-segmented-btn ${typeId === t.id ? "selected" : ""}`}
+              style={typeId === t.id ? { background: t.color + "22", color: t.color } : {}}
+              onClick={() => setTypeId(t.id)}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="ts-modal-row">
+          <div>
+            <label className="ts-field-label">시작일</label>
+            <input className="ts-input" type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+          </div>
+          <div>
+            <label className="ts-field-label">종료일</label>
+            <input className="ts-input" type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+          </div>
+        </div>
+
+        {valid ? (
+          <div className="ts-muted">총 {dateRangeDays(startDate, endDate)}일</div>
+        ) : (
+          <div className="ts-auth-error">종료일은 시작일과 같거나 이후여야 해요.</div>
+        )}
+
+        <label className="ts-field-label">메모 (선택)</label>
+        <input className="ts-input" value={note} onChange={(e) => setNote(e.target.value)} placeholder="예: 연차, OO현장 출장" />
+
+        <div className="ts-modal-actions ts-modal-actions-with-delete">
+          {modal.mode === "edit" && onDelete ? (
+            <div className="ts-modal-delete">
+              {confirmingDelete ? (
+                <>
+                  <span className="ts-muted">삭제할까요?</span>
+                  <button className="ts-icon-btn danger" onClick={() => onDelete(leave.id)} aria-label="삭제 확인">
+                    <Check size={14} />
+                  </button>
+                  <button className="ts-icon-btn" onClick={() => setConfirmingDelete(false)} aria-label="삭제 취소">
+                    <X size={14} />
+                  </button>
+                </>
+              ) : (
+                <button className="ts-icon-btn" onClick={() => setConfirmingDelete(true)} aria-label="일정 삭제">
+                  <Trash2 size={14} />
+                </button>
+              )}
+            </div>
+          ) : (
+            <span />
+          )}
+          <div className="ts-modal-actions-right">
+            <button className="ts-btn ts-btn-ghost" onClick={onClose}>
+              취소
+            </button>
+            <button className="ts-btn ts-btn-start" onClick={handleSave} disabled={!valid}>
+              저장
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Styles() {
+  return (
+    <style>{`
+      @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.css');
+
+      .ts-root, .ts-loading {
+        --bg: #F6F5F3;
+        --surface: #FFFFFF;
+        --surface-alt: #FBFAF8;
+        --ink: #1C1C1E;
+        --ink-muted: #7A7A80;
+        --border: #E6E4E0;
+        --accent: #F2542D;
+        --accent-dark: #D5431E;
+        --accent-soft: #FDE4DC;
+        --radius: 12px;
+        font-family: 'Pretendard Variable', Pretendard, -apple-system, BlinkMacSystemFont, sans-serif;
+        color: var(--ink);
+        background: var(--bg);
+        min-height: 100%;
+        box-sizing: border-box;
+      }
+      .ts-root *, .ts-loading * { box-sizing: border-box; }
+      .ts-loading { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 48px; color: var(--ink-muted); font-size: 14px; }
+      .spin { animation: ts-spin 0.9s linear infinite; }
+      @keyframes ts-spin { to { transform: rotate(360deg); } }
+
+      .ts-root { padding-bottom: 24px; min-height: 100vh; }
+
+      .ts-header {
+        display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+        padding: 14px 20px; background: var(--surface); border-bottom: 1px solid var(--border);
+        position: sticky; top: 0; z-index: 10;
+      }
+      .ts-brand { display: flex; align-items: center; gap: 8px; }
+      .ts-brand-logo { height: 26px; width: auto; display: block; }
+      .ts-nav-desktop { display: flex; gap: 4px; }
+      .ts-nav-btn { border: none; background: transparent; color: var(--ink-muted); font-weight: 600; font-size: 13.5px; padding: 7px 14px; border-radius: 8px; cursor: pointer; transition: all 0.15s; }
+      .ts-nav-btn:hover { background: var(--surface-alt); color: var(--ink); }
+      .ts-nav-btn.active { background: var(--accent-soft); color: var(--accent-dark); }
+      .ts-header-user { display: flex; align-items: center; gap: 8px; }
+      .ts-dept-switch { max-width: 180px; padding: 7px 10px; font-size: 12.5px; }
+      .ts-dept-reassign { max-width: 150px; padding: 6px 8px; font-size: 12px; flex-shrink: 0; }
+      .ts-dept-badge { background: var(--surface-alt); color: var(--ink-muted); font-size: 12px; font-weight: 600; padding: 5px 10px; border-radius: 20px; }
+      .ts-header-username { font-size: 13px; font-weight: 600; }
+
+      .ts-main { max-width: 760px; margin: 0 auto; padding: 20px; }
+      .ts-stack { display: flex; flex-direction: column; gap: 22px; }
+      .ts-stack.ts-tight { gap: 10px; }
+      .ts-status-col { display: flex; flex-direction: column; gap: 10px; }
+
+      .ts-project-status-summary { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+      .ts-status-count-chip {
+        background: var(--surface-alt); border: 1px solid var(--border); border-radius: 20px; padding: 4px 10px;
+        font-size: 11.5px; font-weight: 600; color: var(--ink-muted);
+      }
+      .ts-status-count-chip b { color: var(--ink); font-weight: 700; margin-left: 3px; }
+      .ts-project-toggle-chip { display: inline-flex; align-items: center; gap: 6px; }
+
+      .ts-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; }
+
+      .ts-input, .ts-select {
+        font-family: inherit; font-size: 14px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+        background: var(--surface-alt); color: var(--ink); outline: none; transition: border-color 0.15s;
+      }
+      .ts-input:focus, .ts-select:focus { border-color: var(--accent); background: var(--surface); }
+      .ts-select-full { width: 100%; }
+
+      .ts-btn {
+        display: inline-flex; align-items: center; gap: 7px; border: none; border-radius: 9px;
+        font-family: inherit; font-weight: 600; font-size: 14px; padding: 11px 20px; cursor: pointer; transition: transform 0.1s, opacity 0.15s;
+      }
+      .ts-btn:active { transform: scale(0.97); }
+      .ts-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+      .ts-btn-start { background: var(--accent); color: #fff; }
+      .ts-btn-start:hover:not(:disabled) { background: var(--accent-dark); }
+      .ts-btn-ghost { background: transparent; color: var(--ink-muted); }
+      .ts-btn-ghost:hover { color: var(--ink); }
+      .ts-btn-danger-solid { background: var(--accent-dark); color: #fff; }
+      .ts-btn-small { padding: 7px 14px; font-size: 13px; }
+
+      .ts-section-head { display: flex; align-items: center; justify-content: space-between; }
+      .ts-section-head h2 { font-size: 14.5px; font-weight: 600; margin: 0; display: flex; align-items: center; gap: 8px; color: var(--ink); }
+      .ts-col-count { color: var(--ink-muted); font-weight: 600; font-size: 12px; background: var(--surface-alt); padding: 1px 7px; border-radius: 20px; }
+      .ts-today-tag { background: var(--accent-soft); color: var(--accent-dark); font-size: 10.5px; font-weight: 700; padding: 2px 7px; border-radius: 20px; }
+      .ts-muted { color: var(--ink-muted); font-size: 12.5px; }
+      .ts-board-head-actions { display: flex; align-items: center; gap: 8px; }
+
+      .ts-add-mini { width: 24px; height: 24px; border-radius: 50%; border: 1px dashed var(--border); background: var(--surface); color: var(--ink-muted); display: flex; align-items: center; justify-content: center; cursor: pointer; }
+      .ts-add-mini:hover { border-color: var(--accent); color: var(--accent); }
+
+      .ts-list-card { padding: 6px 18px; }
+      .ts-entry-row, .ts-project-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+      .ts-entry-row:last-child, .ts-project-row:last-child { border-bottom: none; }
+      .ts-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+      .ts-dot-inline { display: inline-block; margin-right: 5px; vertical-align: middle; }
+      .ts-avatar { border-radius: 50%; flex-shrink: 0; color: #fff; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+      .ts-entry-info { flex: 1; min-width: 0; }
+      .ts-entry-desc { font-size: 13.5px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .ts-entry-project { margin-top: 2px; display: flex; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .ts-time-range { font-variant-numeric: tabular-nums; margin-right: 5px; }
+      .ts-entry-time { font-variant-numeric: tabular-nums; font-weight: 600; font-size: 13.5px; flex-shrink: 0; }
+      .ts-entry-actions { display: flex; gap: 2px; flex-shrink: 0; }
+      .ts-entry-actions-spacer { width: 4px; flex-shrink: 0; }
+      .ts-confirm-row { display: flex; gap: 4px; flex-shrink: 0; }
+
+      .ts-icon-btn { width: 26px; height: 26px; border-radius: 6px; border: none; background: transparent; color: var(--ink-muted); display: flex; align-items: center; justify-content: center; cursor: pointer; }
+      .ts-icon-btn:hover { background: var(--surface-alt); color: var(--ink); }
+      .ts-icon-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+      .ts-icon-btn.danger { background: #FDE4DC; color: var(--accent-dark); }
+      .ts-icon-btn.danger:hover { background: var(--accent-soft); }
+
+      .ts-empty { padding: 24px 4px; text-align: center; color: var(--ink-muted); font-size: 13px; }
+      .ts-empty.small { padding: 16px 4px; }
+
+      .ts-week-nav { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+      .ts-week-label { font-weight: 600; font-size: 15px; flex: 1; }
+      .ts-today-btn { border: 1px solid var(--border); background: var(--surface-alt); color: var(--ink-muted); font-size: 12px; font-weight: 600; padding: 5px 10px; border-radius: 7px; cursor: pointer; }
+      .ts-today-btn:hover { color: var(--ink); }
+      .ts-today-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+      .ts-jump-input {
+        border: 1px solid var(--border); background: var(--surface-alt); color: var(--ink); font-family: inherit;
+        font-size: 12px; font-weight: 600; padding: 5px 8px; border-radius: 7px; cursor: pointer; outline: none;
+      }
+      .ts-jump-input:focus { border-color: var(--accent); }
+
+      .ts-view-toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+      .ts-view-toggle-row .ts-view-toggle { margin-bottom: 0; }
+      .ts-view-toggle { display: inline-flex; gap: 4px; background: var(--surface-alt); padding: 3px; border-radius: 9px; margin-bottom: 14px; }
+      .ts-color-legend { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+      .ts-color-legend-item { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 600; color: var(--ink-muted); }
+      .ts-view-toggle button { border: none; background: transparent; padding: 6px 14px; border-radius: 7px; font-weight: 600; font-size: 12.5px; color: var(--ink-muted); cursor: pointer; font-family: inherit; }
+      .ts-view-toggle button.selected { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+
+      .ts-filter-row { display: flex; gap: 6px; flex-wrap: wrap; }
+      .ts-filter-chip { border: 1px solid var(--border); background: var(--surface-alt); color: var(--ink-muted); font-size: 12px; font-weight: 600; padding: 5px 11px; border-radius: 20px; cursor: pointer; transition: all 0.15s; }
+      .ts-filter-chip.selected { background: var(--accent-soft); color: var(--accent-dark); border-color: transparent; }
+      .ts-dept-chip-wrap { display: inline-flex; align-items: center; gap: 2px; }
+      .ts-dept-delete-btn { width: 20px; height: 20px; color: var(--ink-muted); }
+      .ts-dept-delete-btn:hover { background: #FDE4DC; color: var(--accent-dark); }
+
+      .ts-cal-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
+      .ts-cal-summary-actions { display: flex; gap: 8px; }
+      .ts-btn-outline { border: 1px solid var(--border); }
+      .ts-btn-outline:hover { border-color: var(--accent); color: var(--accent-dark); }
+
+      .ts-cal-scroll { max-height: 560px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+      .ts-cal-body { position: relative; display: flex; }
+      .ts-cal-labels { width: 46px; flex-shrink: 0; position: relative; }
+      .ts-cal-label { position: absolute; left: 0; right: 8px; text-align: right; font-size: 10px; color: var(--ink-muted); transform: translateY(-6px); }
+      .ts-cal-lines { flex: 1; position: relative; border-left: 1px solid var(--border); }
+      .ts-cal-line { position: absolute; left: 0; right: 0; border-top: 1px solid var(--border); }
+      .ts-cal-empty { position: absolute; top: 40%; left: 0; right: 0; }
+      .ts-cal-event {
+        position: absolute; border: none; border-left: 3px solid; border-radius: 6px; padding: 4px 7px;
+        overflow: hidden; text-align: left; font-family: inherit; color: var(--ink); cursor: default;
+      }
+      .ts-cal-event.own { cursor: pointer; }
+      .ts-cal-event.own:hover { filter: brightness(0.97); }
+      .ts-cal-event-title { display: block; font-size: 11.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .ts-cal-event-time { display: block; font-size: 10px; opacity: 0.8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .ts-cal-event-type-event { border-left-style: dashed; }
+      .ts-cal-event-cat { font-weight: 700; }
+      .ts-dot-event { background: repeating-linear-gradient(135deg, #9A968D, #9A968D 2px, #fff 2px, #fff 4px); border: 1px solid #9A968D; }
+
+      .ts-week-outer { overflow-x: auto; }
+      .ts-week-inner { min-width: 640px; }
+      .ts-week-header-row { display: flex; margin-bottom: 8px; }
+      .ts-week-header-spacer { width: 46px; flex-shrink: 0; }
+      .ts-week-header-day { flex: 1; text-align: center; padding: 6px 2px; border-radius: 8px; }
+      .ts-week-header-day.today { background: var(--accent-soft); }
+      .ts-week-header-dow { display: block; font-size: 10px; color: var(--ink-muted); font-weight: 600; }
+      .ts-week-header-num { display: block; font-size: 13px; font-weight: 700; margin-top: 2px; }
+      .ts-week-header-day.today .ts-week-header-num { color: var(--accent-dark); }
+      .ts-week-days-grid { flex: 1; display: flex; }
+      .ts-week-allday-row { display: flex; gap: 4px; margin-bottom: 8px; }
+      .ts-week-allday-col { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+
+      .ts-allday-block { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: 10px 12px; }
+      .ts-allday-block-label {
+        display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; color: var(--ink-muted);
+        text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 8px;
+      }
+      .ts-allday-strip { display: flex; flex-wrap: wrap; gap: 6px; }
+      .ts-allday-chip {
+        border: 1.5px solid; border-radius: 20px; padding: 6px 12px; font-family: inherit; font-weight: 600; font-size: 12px;
+        cursor: default; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px;
+      }
+      .ts-allday-chip:not(:disabled) { cursor: pointer; }
+      .ts-allday-chip-cat { font-weight: 700; margin-right: 4px; }
+      .ts-allday-chip-small { max-width: 100%; padding: 3px 8px; font-size: 10.5px; border-radius: 6px; text-align: left; border-width: 1px; }
+
+      .ts-leave-type-badge { display: inline-block; font-size: 10.5px; font-weight: 700; padding: 1px 7px; border-radius: 20px; margin-right: 2px; }
+      .ts-participant-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+      .ts-participant-chip {
+        display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); background: var(--surface-alt);
+        color: var(--ink); font-family: inherit; font-weight: 600; font-size: 12px; padding: 5px 10px 5px 5px; border-radius: 20px; cursor: pointer;
+      }
+      .ts-participant-chip.selected { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-dark); }
+      .ts-allday-toggle { margin-bottom: 2px; }
+      .ts-week-daycol { flex: 1; position: relative; border-left: 1px solid var(--border); }
+      .ts-week-event { padding: 3px 5px; }
+      .ts-week-event .ts-cal-event-title { font-size: 10.5px; }
+
+      .ts-month-wrap { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--surface); }
+      .ts-month-weekdays { display: grid; grid-template-columns: repeat(7, 1fr); border-bottom: 1px solid var(--border); }
+      .ts-month-weekday { text-align: center; font-size: 11px; font-weight: 700; color: var(--ink-muted); padding: 8px 0; }
+      .ts-month-days { display: grid; grid-template-columns: repeat(7, 1fr); }
+      .ts-month-cell {
+        border: none; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); background: var(--surface);
+        min-height: 86px; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; padding: 6px;
+        cursor: pointer; font-family: inherit; text-align: left;
+      }
+      .ts-month-cell:hover { background: var(--surface-alt); }
+      .ts-month-cell.muted { background: var(--surface-alt); opacity: 0.55; }
+      .ts-month-daynum { font-size: 11.5px; font-weight: 600; color: var(--ink); width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; border-radius: 50%; }
+      .ts-month-daynum.today { background: var(--accent); color: #fff; }
+      .ts-month-daytotal { font-size: 10px; font-weight: 700; color: var(--accent-dark); font-variant-numeric: tabular-nums; }
+      .ts-month-dots { display: flex; gap: 3px; }
+      .ts-month-events { display: flex; flex-direction: column; gap: 2px; width: 100%; margin-top: auto; }
+      .ts-month-event-chip {
+        font-size: 9.5px; font-weight: 700; padding: 1px 5px; border-radius: 4px; white-space: nowrap; overflow: hidden;
+        text-overflow: ellipsis; width: 100%; box-sizing: border-box;
+      }
+      .ts-month-event-more { font-size: 9.5px; font-weight: 700; color: var(--ink-muted); }
+
+      .ts-progress-track { width: 140px; height: 6px; background: var(--surface-alt); border-radius: 4px; overflow: hidden; }
+      .ts-progress-fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width 0.25s ease; }
+
+      .ts-progress-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
+      .ts-progress-row:last-child { border-bottom: none; }
+      .ts-progress-row:hover { background: var(--surface-alt); margin: 0 -18px; padding: 12px 18px; border-radius: 8px; }
+      .ts-progress-pct-wrap { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+      .ts-progress-pct-num { font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums; width: 34px; text-align: right; }
+
+      .ts-project-info { flex: 1; min-width: 0; }
+      .ts-project-row-clickable { cursor: pointer; }
+      .ts-project-row-clickable:hover { background: var(--surface-alt); margin: 0 -18px; padding: 12px 18px; border-radius: 8px; }
+      .ts-project-name { font-size: 13.5px; font-weight: 600; }
+      .ts-project-client { margin-top: 1px; }
+      .ts-project-total { font-variant-numeric: tabular-nums; font-weight: 600; font-size: 13px; color: var(--ink-muted); flex-shrink: 0; }
+
+      .ts-new-project-card { display: flex; flex-direction: column; gap: 10px; }
+      .ts-swatches { display: flex; gap: 8px; }
+      .ts-swatch { width: 26px; height: 26px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; }
+      .ts-swatch.selected { border-color: var(--ink); box-shadow: 0 0 0 2px var(--surface); }
+
+      .ts-modal-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+      .ts-modal-actions-with-delete { justify-content: space-between; }
+      .ts-modal-actions-right { display: flex; gap: 8px; }
+      .ts-modal-delete { display: flex; align-items: center; gap: 6px; }
+
+      .ts-task-card { display: flex; flex-direction: column; gap: 12px; padding: 14px 16px; }
+      .ts-task-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+      .ts-task-title-wrap { min-width: 0; flex: 1; }
+      .ts-task-title { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; word-break: break-word; }
+      .ts-task-meta { margin-top: 4px; display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ink-muted); flex-wrap: wrap; }
+      .ts-task-meta-sep { opacity: 0.5; margin: 0 1px; }
+      .ts-priority-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 700; flex-shrink: 0; white-space: nowrap; }
+      .ts-priority-dot { width: 6px; height: 6px; border-radius: 50%; }
+      .ts-task-bottom { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      .ts-status-toggle { gap: 5px; flex-wrap: wrap; }
+      .ts-status-toggle .ts-segmented-btn { padding: 6px 0; font-size: 11.5px; flex: 1 1 70px; }
+      .ts-time-chip {
+        display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border); background: var(--surface-alt);
+        color: var(--ink); font-family: inherit; font-weight: 600; font-size: 12px; padding: 5px 10px; border-radius: 20px; cursor: pointer;
+        font-variant-numeric: tabular-nums;
+      }
+      .ts-time-chip:hover { border-color: var(--accent); color: var(--accent-dark); }
+      .ts-task-actions { display: flex; gap: 2px; margin-left: auto; }
+      .ts-task-actions-spacer { margin-left: auto; width: 4px; }
+
+      .ts-segmented { display: flex; gap: 6px; }
+      .ts-cat-segmented { flex-wrap: wrap; }
+      .ts-cat-segmented .ts-segmented-btn { flex: 1 1 90px; }
+      .ts-segmented-btn {
+        flex: 1; border: 1px solid var(--border); background: var(--surface-alt); color: var(--ink-muted);
+        font-family: inherit; font-weight: 600; font-size: 12.5px; padding: 8px 0; border-radius: 8px; cursor: pointer; transition: all 0.15s;
+      }
+      .ts-segmented-btn.selected { background: var(--accent-soft); color: var(--accent-dark); border-color: transparent; }
+
+      .ts-nav-mobile { display: none; }
+
+      .ts-modal-backdrop { position: fixed; inset: 0; background: rgba(20,17,15,0.45); display: flex; align-items: flex-end; justify-content: center; z-index: 50; backdrop-filter: blur(2px); }
+      .ts-modal { background: var(--surface); width: 100%; max-width: 420px; border-radius: 16px 16px 0 0; padding: 20px; display: flex; flex-direction: column; gap: 10px; max-height: 88vh; overflow-y: auto; }
+      .ts-confirm-modal { gap: 16px; }
+      .ts-confirm-modal p { margin: 0; font-size: 14px; line-height: 1.5; }
+      .ts-modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+      .ts-modal-head h3 { font-size: 16px; margin: 0; }
+      .ts-field-label { font-size: 11.5px; font-weight: 600; color: var(--ink-muted); margin-top: 4px; }
+      .ts-timer-who { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-muted); font-weight: 600; }
+      .ts-modal-row { display: flex; gap: 14px; }
+      .ts-modal-row > div { flex: 1; }
+      .ts-locked-field {
+        display: flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 600;
+        padding: 10px 12px; border: 1px dashed var(--border); border-radius: 8px; background: var(--surface-alt); color: var(--ink-muted);
+      }
+      .ts-admin-badge {
+        display: inline-block; margin-left: 6px; background: var(--accent-soft); color: var(--accent-dark);
+        font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 20px; vertical-align: middle;
+      }
+      .ts-duration-row { display: flex; align-items: center; gap: 6px; }
+      .ts-num-input { width: 56px; text-align: center; }
+
+      .ts-profile-card { display: flex; flex-direction: column; gap: 12px; }
+      .ts-profile-head { display: flex; align-items: center; gap: 12px; padding-bottom: 4px; }
+      .ts-profile-name-preview { font-size: 16px; font-weight: 700; }
+      .ts-profile-saved { color: #2C8C82; font-size: 12.5px; font-weight: 600; }
+
+      .ts-auth-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
+      .ts-auth-card { background: var(--surface); border: 1px solid var(--border); border-radius: 18px; padding: 28px; width: 100%; max-width: 420px; }
+      .ts-auth-brand { margin-bottom: 4px; }
+      .ts-auth-brand .ts-brand-logo { height: 34px; }
+      .ts-auth-sub { color: var(--ink-muted); font-size: 13px; margin: 0 0 20px; }
+      .ts-auth-tabs { display: flex; background: var(--surface-alt); border-radius: 10px; padding: 3px; margin-bottom: 18px; }
+      .ts-auth-tab { flex: 1; border: none; background: transparent; padding: 9px 0; border-radius: 8px; font-weight: 600; font-size: 13.5px; color: var(--ink-muted); cursor: pointer; }
+      .ts-auth-tab.active { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+      .ts-auth-body { display: flex; flex-direction: column; gap: 10px; }
+      .ts-auth-member-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+      .ts-auth-member { display: flex; flex-direction: column; align-items: center; gap: 6px; border: 1px solid var(--border); background: var(--surface-alt); border-radius: 12px; padding: 12px 6px; cursor: pointer; font-size: 12.5px; font-weight: 600; color: var(--ink); }
+      .ts-auth-member.selected { border-color: var(--accent); background: var(--accent-soft); }
+      .ts-auth-pin-row { display: flex; gap: 8px; margin-top: 6px; }
+      .ts-auth-pin-row .ts-input { flex: 1; }
+      .ts-auth-error { color: var(--accent-dark); font-size: 12.5px; font-weight: 600; }
+      .ts-auth-submit { margin-top: 6px; justify-content: center; }
+      .ts-auth-note { color: var(--ink-muted); font-size: 11px; margin: 18px 0 0; line-height: 1.5; }
+
+      .ts-project-detail-backdrop { z-index: 45; }
+      .ts-project-detail-modal { max-width: 560px; }
+      .ts-project-detail-title { display: flex; align-items: center; gap: 8px; }
+      .ts-project-detail-title h3 { margin: 0; }
+      .ts-project-detail-add { align-self: flex-start; margin: 4px 0 6px; }
+
+      @media (min-width: 640px) {
+        .ts-modal-backdrop { align-items: center; }
+        .ts-modal { border-radius: 16px; }
+      }
+
+      @media (max-width: 720px) {
+        .ts-nav-desktop { display: none; }
+        .ts-header { padding: 12px 16px; }
+        .ts-header-username { display: none; }
+        .ts-main { padding: 14px 14px 92px; }
+        .ts-nav-mobile {
+          display: flex; position: fixed; bottom: 0; left: 0; right: 0; z-index: 20;
+          background: var(--surface); border-top: 1px solid var(--border); padding: 6px 4px calc(6px + env(safe-area-inset-bottom));
+        }
+        .ts-nav-mobile-btn { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; border: none; background: transparent; color: var(--ink-muted); padding: 6px 0; border-radius: 10px; font-size: 10px; font-weight: 600; cursor: pointer; }
+        .ts-nav-mobile-btn.active { color: var(--accent-dark); }
+        .ts-auth-card { padding: 22px; }
+        .ts-task-bottom { flex-wrap: wrap; }
+      }
+    `}</style>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<TimesheetApp />);
+</script>
+
+<script>
+  // 위의 text/plain 소스를 classic 런타임으로 직접 변환해서 실행합니다.
+  // (automatic 런타임을 쓰면 Babel이 실제 import 구문을 끼워 넣어서
+  // 일반 <script>에서 "Cannot use import statement outside a module" 에러가 나요)
+  (function () {
+    var sourceEl = document.getElementById("app-source");
+    var source = sourceEl.textContent;
+    var output = Babel.transform(source, {
+      presets: [["react", { runtime: "classic" }]],
+      filename: "app.jsx",
+    }).code;
+    var script = document.createElement("script");
+    script.text = output;
+    document.body.appendChild(script);
+  })();
+</script>
+</body>
+</html>
