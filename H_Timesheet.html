@@ -515,6 +515,18 @@ function TimesheetApp() {
     setMembers((prev) => prev.map((m) => (m.id === memberId ? { ...m, role: m.role === "admin" ? "member" : "admin" } : m)));
   }
 
+  function deleteMember(memberId) {
+    const target = memberById[memberId];
+    if (!target || target.role === "super") return; // 최고 관리자는 여기서 삭제하지 않음
+    if (!canManageDept(target.departmentId)) return;
+    if (target.role === "admin") {
+      const deptAdminCount = members.filter((m) => m.departmentId === target.departmentId && m.role === "admin").length;
+      if (deptAdminCount <= 1) return; // 본부의 마지막 관리자는 삭제할 수 없음
+    }
+    setMembers((prev) => prev.filter((m) => m.id !== memberId));
+    setPendingDelete(null);
+  }
+
   function addDepartment(name) {
     if (!isSuper) return;
     const trimmed = name.trim();
@@ -522,6 +534,19 @@ function TimesheetApp() {
     const dept = { id: uid(), name: trimmed };
     setDepartments((prev) => [...prev, dept]);
     setViewingDepartmentId(dept.id);
+  }
+
+  function deleteDepartment(id) {
+    if (!isSuper) return;
+    setDepartments((prev) => prev.filter((d) => d.id !== id));
+    setMembers((prev) => prev.filter((m) => m.departmentId !== id));
+    setProjects((prev) => prev.filter((p) => p.departmentId !== id));
+    setTasks((prev) => prev.filter((t) => t.departmentId !== id));
+    setWorklogs((prev) => prev.filter((w) => w.departmentId !== id));
+    setEvents((prev) => prev.filter((e) => e.departmentId !== id));
+    setLeaves((prev) => prev.filter((l) => l.departmentId !== id));
+    setViewingDepartmentId((prev) => (prev === id ? null : prev));
+    setPendingDelete(null);
   }
 
   function reassignDepartment(memberId, newDepartmentId) {
@@ -543,6 +568,16 @@ function TimesheetApp() {
     const dup = members.some((m) => m.id !== session && m.name.toLowerCase() === trimmed.toLowerCase());
     if (dup) return { ok: false, error: "이미 사용 중인 이름이에요." };
     setMembers((prev) => prev.map((m) => (m.id === session ? { ...m, name: trimmed, position: position.trim() } : m)));
+    return { ok: true };
+  }
+
+  function changePassword({ currentPassword, newPassword, newPassword2 }) {
+    if (!session) return { ok: false, error: "로그인이 필요해요." };
+    const me = memberById[session];
+    if (!me || me.password !== currentPassword) return { ok: false, error: "현재 비밀번호가 올바르지 않아요." };
+    if (!newPassword || newPassword.length < 4) return { ok: false, error: "새 비밀번호는 4자 이상으로 설정해주세요." };
+    if (newPassword !== newPassword2) return { ok: false, error: "새 비밀번호가 서로 일치하지 않아요." };
+    setMembers((prev) => prev.map((m) => (m.id === session ? { ...m, password: newPassword } : m)));
     return { ok: true };
   }
 
@@ -814,11 +849,21 @@ function TimesheetApp() {
                 setViewingDepartmentId={setViewingDepartmentId}
                 allMembers={members}
                 onReassignDepartment={reassignDepartment}
+                pendingDelete={pendingDelete}
+                onAskDeleteMember={(id) => setPendingDelete({ type: "member", id })}
+                onConfirmDeleteMember={deleteMember}
+                onAskDeleteDepartment={(id) => setPendingDelete({ type: "department", id })}
+                onCancelDelete={() => setPendingDelete(null)}
               />
             )}
 
             {tab === "profile" && (
-              <ProfileTab currentMember={currentMember} departmentName={departmentById[currentMember?.departmentId]?.name} onSave={updateProfile} />
+              <ProfileTab
+                currentMember={currentMember}
+                departmentName={departmentById[currentMember?.departmentId]?.name}
+                onSave={updateProfile}
+                onChangePassword={changePassword}
+              />
             )}
           </>
         )}
@@ -932,6 +977,14 @@ function TimesheetApp() {
         <ConfirmBar
           label="이 업무를 삭제할까요? 기록된 시간도 함께 삭제돼요."
           onConfirm={() => deleteTask(pendingDelete.id)}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
+
+      {pendingDelete?.type === "department" && (
+        <ConfirmBar
+          label={`"${departments.find((d) => d.id === pendingDelete.id)?.name || "이 본부"}"를 삭제할까요? 이 본부의 팀원, 프로젝트, 업무, 타임로그, 이벤트, 휴가 기록이 모두 함께 삭제돼요. 되돌릴 수 없어요.`}
+          onConfirm={() => deleteDepartment(pendingDelete.id)}
           onCancel={() => setPendingDelete(null)}
         />
       )}
@@ -2102,11 +2155,17 @@ function TimesheetTab({
   );
 }
 
-function ProfileTab({ currentMember, departmentName, onSave }) {
+function ProfileTab({ currentMember, departmentName, onSave, onChangePassword }) {
   const [name, setName] = useState(currentMember?.name || "");
   const [position, setPosition] = useState(currentMember?.position || "");
   const [error, setError] = useState("");
   const [savedFlash, setSavedFlash] = useState(false);
+
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [newPassword2, setNewPassword2] = useState("");
+  const [pwError, setPwError] = useState("");
+  const [pwSavedFlash, setPwSavedFlash] = useState(false);
 
   useEffect(() => {
     setName(currentMember?.name || "");
@@ -2124,7 +2183,22 @@ function ProfileTab({ currentMember, departmentName, onSave }) {
     setTimeout(() => setSavedFlash(false), 1800);
   }
 
+  function handleChangePassword() {
+    const result = onChangePassword({ currentPassword, newPassword, newPassword2 });
+    if (!result?.ok) {
+      setPwError(result?.error || "변경하지 못했어요.");
+      return;
+    }
+    setPwError("");
+    setCurrentPassword("");
+    setNewPassword("");
+    setNewPassword2("");
+    setPwSavedFlash(true);
+    setTimeout(() => setPwSavedFlash(false), 1800);
+  }
+
   const dirty = name.trim() !== (currentMember?.name || "") || position.trim() !== (currentMember?.position || "");
+  const pwValid = currentPassword.length > 0 && newPassword.length >= 4 && newPassword === newPassword2;
 
   return (
     <div className="ts-stack">
@@ -2161,7 +2235,35 @@ function ProfileTab({ currentMember, departmentName, onSave }) {
         </div>
       </div>
 
-      <div className="ts-muted">본부, 계정, 비밀번호 변경은 관리자에게 문의해주세요.</div>
+      <div className="ts-section-head">
+        <h2>비밀번호 변경</h2>
+      </div>
+      <div className="ts-card ts-profile-card">
+        <label className="ts-field-label">현재 비밀번호</label>
+        <input className="ts-input" type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} />
+
+        <div className="ts-modal-row">
+          <div>
+            <label className="ts-field-label">새 비밀번호</label>
+            <input className="ts-input" type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="4자 이상" />
+          </div>
+          <div>
+            <label className="ts-field-label">새 비밀번호 확인</label>
+            <input className="ts-input" type="password" value={newPassword2} onChange={(e) => setNewPassword2(e.target.value)} />
+          </div>
+        </div>
+
+        {pwError && <div className="ts-auth-error">{pwError}</div>}
+        {pwSavedFlash && <div className="ts-profile-saved">비밀번호가 변경됐어요.</div>}
+
+        <div className="ts-modal-actions">
+          <button className="ts-btn ts-btn-start" onClick={handleChangePassword} disabled={!pwValid}>
+            비밀번호 변경
+          </button>
+        </div>
+      </div>
+
+      <div className="ts-muted">본부, 계정, 관리자 권한 변경은 관리자에게 문의해주세요.</div>
     </div>
   );
 }
@@ -2177,6 +2279,11 @@ function TeamTab({
   setViewingDepartmentId,
   allMembers,
   onReassignDepartment,
+  pendingDelete,
+  onAskDeleteMember,
+  onConfirmDeleteMember,
+  onAskDeleteDepartment,
+  onCancelDelete,
 }) {
   const [newDeptName, setNewDeptName] = useState("");
   const canManageThisDept = currentMember?.role === "super" || (currentMember?.role === "admin" && currentMember.departmentId === viewingDepartmentId);
@@ -2207,13 +2314,22 @@ function TeamTab({
             {departments.length > 0 && (
               <div className="ts-filter-row">
                 {departments.map((d) => (
-                  <button
-                    key={d.id}
-                    className={`ts-filter-chip ${viewingDepartmentId === d.id ? "selected" : ""}`}
-                    onClick={() => setViewingDepartmentId(d.id)}
-                  >
-                    {d.name}
-                  </button>
+                  <span key={d.id} className="ts-dept-chip-wrap">
+                    <button
+                      className={`ts-filter-chip ${viewingDepartmentId === d.id ? "selected" : ""}`}
+                      onClick={() => setViewingDepartmentId(d.id)}
+                    >
+                      {d.name}
+                    </button>
+                    <button
+                      className="ts-icon-btn ts-dept-delete-btn"
+                      onClick={() => onAskDeleteDepartment(d.id)}
+                      aria-label={`${d.name} 삭제`}
+                      title="본부 삭제"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </span>
                 ))}
               </div>
             )}
@@ -2282,6 +2398,7 @@ function TeamTab({
         ) : (
           members.map((m) => {
             const isLastDeptAdmin = m.role === "admin" && deptAdminCount <= 1;
+            const confirming = pendingDelete?.type === "member" && pendingDelete.id === m.id;
             return (
               <div className="ts-project-row" key={m.id}>
                 <MemberAvatar member={m} size={24} />
@@ -2303,6 +2420,28 @@ function TeamTab({
                   >
                     {m.role === "admin" ? "관리자 해제" : "관리자로 지정"}
                   </button>
+                )}
+                {canManageThisDept && m.role !== "super" && (
+                  confirming ? (
+                    <div className="ts-confirm-row">
+                      <button className="ts-icon-btn danger" onClick={() => onConfirmDeleteMember(m.id)} aria-label="삭제 확인">
+                        <Check size={14} />
+                      </button>
+                      <button className="ts-icon-btn" onClick={onCancelDelete} aria-label="삭제 취소">
+                        <X size={14} />
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      className="ts-icon-btn"
+                      onClick={() => onAskDeleteMember(m.id)}
+                      disabled={isLastDeptAdmin}
+                      title={isLastDeptAdmin ? "이 본부의 마지막 관리자는 삭제할 수 없어요" : "계정 삭제"}
+                      aria-label="계정 삭제"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  )
                 )}
               </div>
             );
@@ -3235,6 +3374,9 @@ function Styles() {
       .ts-filter-row { display: flex; gap: 6px; flex-wrap: wrap; }
       .ts-filter-chip { border: 1px solid var(--border); background: var(--surface-alt); color: var(--ink-muted); font-size: 12px; font-weight: 600; padding: 5px 11px; border-radius: 20px; cursor: pointer; transition: all 0.15s; }
       .ts-filter-chip.selected { background: var(--accent-soft); color: var(--accent-dark); border-color: transparent; }
+      .ts-dept-chip-wrap { display: inline-flex; align-items: center; gap: 2px; }
+      .ts-dept-delete-btn { width: 20px; height: 20px; color: var(--ink-muted); }
+      .ts-dept-delete-btn:hover { background: #FDE4DC; color: var(--accent-dark); }
 
       .ts-cal-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
       .ts-cal-summary-actions { display: flex; gap: 8px; }
